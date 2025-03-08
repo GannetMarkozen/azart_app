@@ -67,6 +67,14 @@ macro_rules! dbgfmt {
 }
 
 #[macro_export]
+#[cfg(debug_assertions)]
+macro_rules! dbgstr {
+	($s:expr) => {
+		DebugString::_new($s.into())
+	}
+}
+
+#[macro_export]
 #[cfg(not(debug_assertions))]
 macro_rules! dformat {
 	($($arg:tt)*) => {
@@ -74,4 +82,13 @@ macro_rules! dformat {
 	}
 }
 
+#[macro_export]
+#[cfg(not(debug_assertions))]
+macro_rules! dbgstr {
+	($s:expr) => {
+		DebugString::default()
+	}
+}
+
 pub use dbgfmt;
+pub use dbgstr;

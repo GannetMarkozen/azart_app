@@ -1,9 +1,15 @@
 use std::ffi::{c_char, CStr, CString};
+use std::mem::ManuallyDrop;
 use std::num::NonZero;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
 use ash::vk;
 use bevy::log::warn;
+use bevy::prelude::Resource;
 use bevy::utils::HashSet;
 use cstr::cstr;
+use gpu_allocator::{AllocationSizes, AllocatorDebugSettings};
+use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
@@ -12,6 +18,7 @@ pub struct GpuContext {
 	pub device: ash::Device,
 	pub queue_families: QueueFamilies,
 	pub extensions: Extensions,
+	pub(crate) allocator: ManuallyDrop<Mutex<Allocator>>,
 }
 
 impl GpuContext {
@@ -26,9 +33,9 @@ impl GpuContext {
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 0] = [];
 
 	const DEVICE_EXTENSION_NAMES: [&'static CStr; 8] = [
-		ash::ext::buffer_device_address::NAME,
 		ash::ext::descriptor_indexing::NAME,
 		ash::ext::extended_dynamic_state::NAME,
+		ash::khr::buffer_device_address::NAME,
 		ash::khr::swapchain::NAME,
 		ash::khr::multiview::NAME,
 		ash::khr::draw_indirect_count::NAME,
@@ -210,10 +217,15 @@ impl GpuContext {
 				enable_feature!(shader_storage_image_array_dynamic_indexing);
 				enable_feature!(shader_storage_buffer_array_dynamic_indexing);
 
+				let mut buffer_device_address_features = vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
+					.buffer_device_address(true);
+
+
 				let create_info = vk::DeviceCreateInfo::default()
 					.enabled_extension_names(&extensions)
 					.queue_create_infos(&queue_create_infos)
-					.enabled_features(&features);
+					.enabled_features(&features)
+					.push_next(&mut buffer_device_address_features);
 
 				instance.create_device(physical_device, &create_info, None).expect("failed to create logical device!")
 			};
@@ -225,6 +237,29 @@ impl GpuContext {
 				debug_utils: ash::ext::debug_utils::Device::new(&instance, &device),
 			};
 
+			let allocator = {
+				#[cfg(debug_assertions)]
+				let debug_settings = AllocatorDebugSettings {
+					log_leaks_on_shutdown: true,
+					store_stack_traces: true,
+					..Default::default()
+				};
+
+				#[cfg(not(debug_assertions))]
+				let debug_settings = AllocatorDebugSettings::default();
+
+				let create_info = AllocatorCreateDesc {
+					instance: instance.clone(),
+					device: device.clone(),
+					physical_device,
+					debug_settings,
+					buffer_device_address: true,
+					allocation_sizes: AllocationSizes::default(),
+				};
+
+				Allocator::new(&create_info).unwrap()
+			};
+
 			Self {
 				entry,
 				instance,
@@ -232,8 +267,17 @@ impl GpuContext {
 				device,
 				queue_families,
 				extensions,
+				allocator: ManuallyDrop::new(Mutex::new(allocator)),
 			}
 		}
+	}
+
+	pub fn alloc(&self, create_info: &gpu_allocator::vulkan::AllocationCreateDesc) -> Allocation {
+		self.allocator.lock().unwrap().allocate(&create_info).expect("Failed to allocate memory!")
+	}
+
+	pub fn dealloc(&self, allocation: Allocation) {
+		self.allocator.lock().unwrap().free(allocation).expect("Failed to deallocate allocation!");
 	}
 
 	pub unsafe fn cmd_transition_image_layout(
@@ -340,6 +384,7 @@ impl GpuContext {
 impl Drop for GpuContext {
 	fn drop(&mut self) {
 		unsafe {
+			ManuallyDrop::drop(&mut self.allocator);
 			self.device.destroy_device(None);
 			self.instance.destroy_instance(None);
 		}
@@ -357,4 +402,22 @@ pub struct Extensions {
 	pub surface: ash::khr::surface::Instance,
 	#[cfg(debug_assertions)]
 	pub debug_utils: ash::ext::debug_utils::Device,
+}
+
+// Bevy Resource that holds an Arc<GpuContext>.
+#[derive(Resource, Clone)]
+pub struct GpuContextHandle(pub Arc<GpuContext>);
+
+impl GpuContextHandle {
+	pub const fn new(context: Arc<GpuContext>) -> Self {
+		Self(context)
+	}
+}
+
+impl Deref for GpuContextHandle {
+	type Target = Arc<GpuContext>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
 }

@@ -311,6 +311,7 @@ dependencies = [
  "bevy",
  "color-eyre",
  "cstr",
+ "gpu-allocator",
  "log",
  "winit",
 ]
@@ -1848,6 +1849,7 @@ version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c151a2a5ef800297b4e79efa4f4bec035c5f51d5ae587287c9b952bdf734cacd"
 dependencies = [
+ "ash",
  "log",
  "presser",
  "thiserror",
