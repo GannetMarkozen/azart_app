@@ -1,0 +1,17 @@
+[package]
+name = "azart_app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = "0.38.0"
+ash-window = "0.13.0"
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "webgpu", "bevy_window", "bevy_asset", "multi_threaded"] }
+color-eyre = "0.6.3"
+cstr = "0.2.12"
+winit = "0.30.9"
+log = "0.4.26"
+
+[profile.dev]
+incremental = true
+lto = false
