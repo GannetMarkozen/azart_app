@@ -39,7 +39,7 @@ impl Image {
 			assert!(
 				!matches!(unsafe { context.instance.get_physical_device_image_format_properties(context.physical_device, create_info.format, vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, flags) },
 				Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED)),
-				"Image \"{name}\" is not supported with: format: {:?}, tiling: {:?}, usage: {:?}.", create_info.format, create_info.tiling, create_info.usage
+				"Image \"{name}\" is not supported with: {:?}", create_info,
 			);
 
 			let create_info = vk::ImageCreateInfo::default()
@@ -63,15 +63,32 @@ impl Image {
 		};
 
 		let allocation = {
-			let create_info = AllocationCreateDesc {
-				name: name.as_str(),
-				requirements: unsafe { context.device.get_image_memory_requirements(image) },
-				location: create_info.memory,
-				linear: true,
-				allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+			let (requirements, dedicated_allocation) = {
+				let info = vk::ImageMemoryRequirementsInfo2::default()
+					.image(image);
+
+				let mut requirements = vk::MemoryRequirements2::default();
+				let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
+				requirements.push_next(&mut dedicated_requirements);
+
+				unsafe { context.device.get_image_memory_requirements2(&info, &mut requirements); }
+				(requirements.memory_requirements, dedicated_requirements.prefers_dedicated_allocation == vk::TRUE)
 			};
 
-			context.allocator.lock().unwrap().allocate(&create_info).expect("failed to allocate image memory!")
+			let allocation_scheme = match dedicated_allocation {
+				true => AllocationScheme::DedicatedImage(image),
+				false => AllocationScheme::GpuAllocatorManaged,
+			};
+
+			let create_info = AllocationCreateDesc {
+				name: name.as_str(),
+				requirements,
+				location: create_info.memory,
+				linear: create_info.tiling == vk::ImageTiling::LINEAR,
+				allocation_scheme,
+			};
+
+			context.alloc(&create_info)
 		};
 
 		unsafe { context.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }.expect("failed to bind image memory!");
@@ -82,7 +99,11 @@ impl Image {
 				.view_type(if create_info.array_layers == 1 { vk::ImageViewType::TYPE_2D } else { vk::ImageViewType::TYPE_2D_ARRAY })
 				.format(create_info.format)
 				.subresource_range(vk::ImageSubresourceRange::default()
-					.aspect_mask(vk::ImageAspectFlags::COLOR)
+					.aspect_mask(match create_info.format {
+						vk::Format::D32_SFLOAT | vk::Format::X8_D24_UNORM_PACK32 | vk::Format::D16_UNORM => vk::ImageAspectFlags::DEPTH,
+						vk::Format::D32_SFLOAT_S8_UINT | vk::Format::D24_UNORM_S8_UINT => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+						_ => vk::ImageAspectFlags::COLOR,
+					})
 					.base_mip_level(0)
 					.level_count(mip_levels)
 					.base_array_layer(0)
@@ -94,8 +115,8 @@ impl Image {
 		
 		#[cfg(debug_assertions)]
 		unsafe {
-			context.set_debug_name_for_gpu_resource(name.as_str(), image);
-			context.set_debug_name_for_gpu_resource(format!("{name}_view").as_str(), image_view);
+			context.set_debug_name(name.as_str(), image);
+			context.set_debug_name(format!("{name}_view").as_str(), image_view);
 		}
 
 		Self {
@@ -141,7 +162,7 @@ impl Default for ImageCreateInfo {
 			format: vk::Format::R8G8B8A8_SRGB,
 			usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 			initial_layout: vk::ImageLayout::UNDEFINED,
-			tiling: vk::ImageTiling::LINEAR,
+			tiling: vk::ImageTiling::OPTIMAL,
 			array_layers: 1,
 			memory: MemoryLocation::GpuOnly,
 		}

@@ -1,4 +1,5 @@
 use bevy::{prelude::*, a11y::AccessibilityPlugin};
+use bevy::gltf::GltfPlugin;
 use bevy::input::InputPlugin;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::log::LogPlugin;
@@ -17,6 +18,7 @@ impl Plugin for AzartPlugin {
 		app
 			.add_plugins(MinimalPlugins)
 			.add_plugins(AssetPlugin::default())
+			.add_plugins(GltfPlugin::default())
 			.add_plugins(InputPlugin::default())
 			.add_plugins(WindowPlugin {
 				primary_window: Some(Window {

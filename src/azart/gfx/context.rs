@@ -1,4 +1,5 @@
 use std::ffi::{c_char, CStr, CString};
+use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::num::NonZero;
 use std::ops::Deref;
@@ -6,10 +7,12 @@ use std::sync::{Arc, Mutex};
 use ash::vk;
 use bevy::log::warn;
 use bevy::prelude::Resource;
+use bevy::tasks::IoTaskPool;
 use bevy::utils::HashSet;
-use cstr::cstr;
 use gpu_allocator::{AllocationSizes, AllocatorDebugSettings};
 use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
+use thiserror::Error;
+use crate::azart::gfx::misc::ShaderPath;
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
@@ -23,7 +26,7 @@ pub struct GpuContext {
 
 impl GpuContext {
 	#[cfg(debug_assertions)]
-	const INSTANCE_LAYER_NAMES: [&'static CStr; 1] = [cstr!("VK_LAYER_KHRONOS_validation")];
+	const INSTANCE_LAYER_NAMES: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
 	#[cfg(not(debug_assertions))]
 	const INSTANCE_LAYER_NAMES: [&'static CStr; 0] = [];
 
@@ -43,7 +46,7 @@ impl GpuContext {
 		ash::khr::fragment_shading_rate::NAME,
 	];
 
-	pub fn new(extensions: &[&'static CStr]) -> Self {
+	pub fn new(extensions: &[&CStr]) -> Self {
 		unsafe {
 			let entry = ash::Entry::load().expect("failed to create entry point for vulkan!");
 			let instance = {
@@ -72,8 +75,6 @@ impl GpuContext {
 				};
 
 				let extensions = {
-					let first_extension = layer_names.first().map(|&x| CStr::from_ptr(x));
-
 					let available_extensions = [None]
 						.into_iter()
 						.chain(layer_names
@@ -101,12 +102,10 @@ impl GpuContext {
 						.collect::<Vec<_>>()
 				};
 
-				println!("instance extension names {:?}", extensions.iter().map(|&x| CStr::from_ptr(x).to_str().unwrap()).collect::<Vec<_>>());
-
 				let app_info = vk::ApplicationInfo::default()
 					.api_version(vk::make_api_version(0, 1, 1, 0))
-					.application_name(cstr!("AzartGame"))
-					.engine_name(cstr!("AzartEngine"))
+					.application_name(c"azart game")
+					.engine_name(c"azart engine")
 					.engine_version(vk::make_api_version(0, 1, 0, 0));
 
 				let create_info = vk::InstanceCreateInfo::default()
@@ -127,13 +126,8 @@ impl GpuContext {
 				let result = props
 					.iter()
 					.enumerate()
-					.filter(|(_, x)| {
-						x.api_version >= vk::make_api_version(0, 1, 1, 0) && match x.device_type {
-							vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU => true,
-							_ => false,
-						}
-					})
-					.max_by(|(_, a), (_, b)| a.device_type.cmp(&b.device_type))
+					.filter(|&(_, x)| x.api_version >= vk::make_api_version(0, 1, 1, 0) && matches!(x.device_type, vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU))
+					.max_by(|&(_, a), (_, b)| a.device_type.cmp(&b.device_type))
 					.expect("failed to find a suitable physical device!")
 					.0;
 
@@ -144,8 +138,8 @@ impl GpuContext {
 					queue_family_props
 						.iter()
 						.enumerate()
-						.filter(|(_, x)| x.queue_flags & flags == flags)
-						.max_by(|(_, a), (_, b)| a.queue_count.cmp(&b.queue_count))
+						.filter(|&(_, x)| x.queue_flags & flags == flags)
+						.max_by(|&(_, a), (_, b)| a.queue_count.cmp(&b.queue_count))
 						.unwrap_or_else(|| panic!("failed to find suitable queue family with flags {:?}", flags))
 						.0 as u32
 				};
@@ -219,7 +213,6 @@ impl GpuContext {
 
 				let mut buffer_device_address_features = vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
 					.buffer_device_address(true);
-
 
 				let create_info = vk::DeviceCreateInfo::default()
 					.enabled_extension_names(&extensions)
@@ -307,13 +300,13 @@ impl GpuContext {
 				AccessFlags::empty(),
 				AccessFlags::TRANSFER_WRITE,
 				PipelineStageFlags::TOP_OF_PIPE,
-				PipelineStageFlags::TRANSFER
+				PipelineStageFlags::TRANSFER,
 			),
 			(ImageLayout::TRANSFER_DST_OPTIMAL, ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
 				AccessFlags::TRANSFER_WRITE,
 				AccessFlags::SHADER_READ,
 				PipelineStageFlags::TRANSFER,
-				PipelineStageFlags::FRAGMENT_SHADER
+				PipelineStageFlags::FRAGMENT_SHADER,
 			),
 			(ImageLayout::TRANSFER_DST_OPTIMAL, ImageLayout::PRESENT_SRC_KHR) => (
 				AccessFlags::TRANSFER_WRITE,
@@ -325,18 +318,14 @@ impl GpuContext {
 				AccessFlags::empty(),
 				AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::INPUT_ATTACHMENT_READ,
 				PipelineStageFlags::TOP_OF_PIPE,
-				PipelineStageFlags::EARLY_FRAGMENT_TESTS
+				PipelineStageFlags::EARLY_FRAGMENT_TESTS,
 			),
-			_ => todo!("Unhandled layout transition {:?} to {:?}", old_layout, new_layout),
+			_ => panic!("Unhandled layout transition {:?} to {:?}", old_layout, new_layout),
 		};
 
-		let aspect_mask = match new_layout {
-			ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
-				match format {
-					Format::D32_SFLOAT_S8_UINT | Format::D24_UNORM_S8_UINT => ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL,
-					_ => ImageAspectFlags::DEPTH,
-				}
-			},
+		let aspect_mask = match (new_layout, format) {
+			(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, Format::D32_SFLOAT_S8_UINT | Format::D24_UNORM_S8_UINT) => ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL,
+			(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, _) => ImageAspectFlags::DEPTH,
 			_ => ImageAspectFlags::COLOR,
 		};
 
@@ -356,28 +345,61 @@ impl GpuContext {
 				.layer_count(1)
 			);
 
-		self.device.cmd_pipeline_barrier(cmd, src_stage, dst_stage, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
+		unsafe { self.device.cmd_pipeline_barrier(cmd, src_stage, dst_stage, vk::DependencyFlags::empty(), &[], &[], &[barrier]); }
+	}
+
+	pub fn create_shader_module(&self, path: ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
+		#[cfg(debug_assertions)]
+		if !path.as_str().ends_with(".spv") {
+			return Err(ShaderModuleError::NotSpv);
+		}
+
+		let mut file = match std::fs::File::open(path.as_str()) {
+			Ok(file) => file,
+			Err(e) => return match e.kind() {
+				std::io::ErrorKind::NotFound => Err(ShaderModuleError::InvalidPath(path.as_str().to_owned())),
+				std::io::ErrorKind::PermissionDenied => Err(ShaderModuleError::PermissionDenied(path.as_str().to_owned())),
+				_ => Err(ShaderModuleError::UnknownFileError(path.as_str().to_owned(), e)),
+			},
+		};
+
+		let mut code = vec![];
+		file.read_to_end(&mut code).unwrap();
+
+		let code = bytemuck::cast_slice(&code);
+
+		let shader_module = {
+			let create_info = vk::ShaderModuleCreateInfo::default()
+				.code(&code);
+
+			unsafe { self.device.create_shader_module(&create_info, None) }.expect("Failed to create shader module!")
+		};
+
+		Ok(ShaderModule {
+			handle: shader_module,
+			context: &self,
+		})
 	}
 
 	pub fn wait_idle(&self) {
-		unsafe {
-			self.device.device_wait_idle().expect("Failed to wait for device to become idle!");
-		}
+		unsafe { self.device.device_wait_idle().expect("Failed to wait for device to become idle!"); }
 	}
 
+	// Handle must be valid and ensure this is only called from a single thread per-object!
 	#[cfg(debug_assertions)]
-	pub unsafe fn set_debug_name_for_gpu_resource_cstr(&self, name: &CStr, handle: impl vk::Handle) {
+	pub unsafe fn set_debug_name_cstr(&self, name: &CStr, handle: impl vk::Handle) {
 		let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
 			.object_name(name)
 			.object_handle(handle);
 
-		self.extensions.debug_utils.set_debug_utils_object_name(&name_info).expect("Failed to set debug name!");
+		unsafe { self.extensions.debug_utils.set_debug_utils_object_name(&name_info) }.expect("Failed to set debug name!");
 	}
 
+	// Handle must be valid and ensure this is only called from a single thread per-object!
 	#[cfg(debug_assertions)]
-	pub unsafe fn set_debug_name_for_gpu_resource(&self, name: &str, handle: impl vk::Handle) {
+	pub unsafe fn set_debug_name(&self, name: &str, handle: impl vk::Handle) {
 		let name = CString::new(name).unwrap_or_else(|_| panic!("Failed to convert string \"{name}\" to CString!"));
-		self.set_debug_name_for_gpu_resource_cstr(name.as_c_str(), handle);
+		unsafe { self.set_debug_name_cstr(name.as_c_str(), handle); }
 	}
 }
 
@@ -405,7 +427,7 @@ pub struct Extensions {
 }
 
 // Bevy Resource that holds an Arc<GpuContext>.
-#[derive(Resource, Clone)]
+#[derive(Resource)]
 pub struct GpuContextHandle(pub Arc<GpuContext>);
 
 impl GpuContextHandle {
@@ -420,4 +442,27 @@ impl Deref for GpuContextHandle {
 	fn deref(&self) -> &Self::Target {
 		&self.0
 	}
+}
+
+pub struct ShaderModule<'a> {
+	pub handle: vk::ShaderModule,
+	pub(crate) context: &'a GpuContext,
+}
+
+impl<'a> Drop for ShaderModule<'a> {
+	fn drop(&mut self) {
+		unsafe { self.context.device.destroy_shader_module(self.handle, None); }
+	}
+}
+
+#[derive(Debug, Error)]
+pub enum ShaderModuleError {
+	#[error("Invalid path {0}!")]
+	InvalidPath(String),
+	#[error("Permission denied to access file path {0}!")]
+	PermissionDenied(String),
+	#[error("Failed to read shader module {0}! Error {1}")]
+	UnknownFileError(String, std::io::Error),
+	#[error("No .spv suffix on path!")]
+	NotSpv,
 }

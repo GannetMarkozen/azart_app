@@ -7,9 +7,10 @@ use crate::azart::utils::debug_string::DebugString;
 pub struct RenderPass {
 	name: DebugString,
 	pub(crate) handle: vk::RenderPass,
-	context: Arc<GpuContext>,
+	pub(crate) context: Arc<GpuContext>,
 }
 
+// TODO
 impl RenderPass {
 	pub fn new(
 		name: DebugString,
@@ -27,8 +28,6 @@ impl RenderPass {
 				.attachments(&attachments);
 
 		};
-
-		todo!();
 
 		Self {
 			name,

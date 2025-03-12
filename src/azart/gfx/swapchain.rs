@@ -145,12 +145,12 @@ impl Swapchain {
 
 				#[cfg(debug_assertions)]
 				unsafe {
-					context.set_debug_name_for_gpu_resource(format!("{name}_image[{i}]").as_str(), image);
-					context.set_debug_name_for_gpu_resource(format!("{name}_image_view[{i}]").as_str(), image_view);
-					context.set_debug_name_for_gpu_resource(format!("{name}_graphics_command_pool[{i}]").as_str(), graphics_command_pool);
-					context.set_debug_name_for_gpu_resource(format!("{name}_graphics_command_buffer[{i}]").as_str(), graphics_command_buffer);
-					context.set_debug_name_for_gpu_resource(format!("{name}_in_flight_fence[{i}]").as_str(), in_flight_fence);
-					context.set_debug_name_for_gpu_resource(format!("{name}_image_available_semaphore[{i}]").as_str(), image_available_semaphore);
+					context.set_debug_name(format!("{name}_image[{i}]").as_str(), image);
+					context.set_debug_name(format!("{name}_image_view[{i}]").as_str(), image_view);
+					context.set_debug_name(format!("{name}_graphics_command_pool[{i}]").as_str(), graphics_command_pool);
+					context.set_debug_name(format!("{name}_graphics_command_buffer[{i}]").as_str(), graphics_command_buffer);
+					context.set_debug_name(format!("{name}_in_flight_fence[{i}]").as_str(), in_flight_fence);
+					context.set_debug_name(format!("{name}_image_available_semaphore[{i}]").as_str(), image_available_semaphore);
 				}
 
 				FrameState {
@@ -178,8 +178,8 @@ impl Swapchain {
 
 		#[cfg(debug_assertions)]
 		unsafe {
-			context.set_debug_name_for_gpu_resource(format!("{name}_surface").as_str(), surface);
-			context.set_debug_name_for_gpu_resource(name.as_str(), swapchain);
+			context.set_debug_name(format!("{name}_surface").as_str(), surface);
+			context.set_debug_name(name.as_str(), swapchain);
 		}
 
 		Self {
