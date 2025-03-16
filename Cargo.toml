@@ -7,17 +7,34 @@ build = "build.rs"
 [dependencies]
 ash = "0.38.0"
 ash-window = "0.13.0"
-bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "webgpu", "bevy_window", "bevy_asset", "bevy_gltf", "multi_threaded"] }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
 color-eyre = "0.6.3"
 winit = "0.30.9"
 gpu-allocator = "0.27.0"
 thiserror = "2.0.12"
 bytemuck = "1.22.0"
 bitflags = "2.9.0"
+image = "0.25.5"
+spirv-reflect = "0.2.3"
 
 [build-dependencies]
 color-eyre = "0.6.3"
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug-assertions = false
+
 [profile.dev]
+debug = 1
 incremental = true
 lto = false
+
+[profile.release.package."spirv-reflect"]
+debug-assertions = false # Crashes.
+
+[profile.dev.package."spirv-reflect"]
+debug-assertions = false # Crashes.

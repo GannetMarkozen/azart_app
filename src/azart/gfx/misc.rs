@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use bevy::prelude::*;
 use ash::vk;
 
+pub trait GpuResource {}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct ShaderPath<'a> {
 	path: &'a str,
@@ -25,19 +27,31 @@ macro_rules! shader_path {
 	}
 }
 
+#[macro_export]
+macro_rules! asset_path {
+	($path:expr) => {
+		concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path)
+	}
+}
+
 //pub use shader_path;
 
-#[derive(Default, Copy, Clone, Eq, PartialEq, Hash, Debug, Reflect, Resource)]
+#[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Reflect, Resource)]
 pub enum MsaaCount {
 	#[default]
-	Sample1,
+	Sample1,// No MSAA.
 	Sample2,
 	Sample4,
 	Sample8,
-	Sample16,
 }
 
 impl MsaaCount {
+	// If Msaa > 1.
+	#[inline(always)]
+	pub const fn enabled(&self) -> bool {
+		!matches!(self, MsaaCount::Sample1)
+	}
+
 	#[inline(always)]
 	pub const fn as_u32(&self) -> u32 {
 		match self {
@@ -45,7 +59,6 @@ impl MsaaCount {
 			MsaaCount::Sample2 => 2,
 			MsaaCount::Sample4 => 4,
 			MsaaCount::Sample8 => 8,
-			MsaaCount::Sample16 => 16,
 		}
 	}
 	
@@ -56,9 +69,8 @@ impl MsaaCount {
 			MsaaCount::Sample2 => vk::SampleCountFlags::TYPE_2,
 			MsaaCount::Sample4 => vk::SampleCountFlags::TYPE_4,
 			MsaaCount::Sample8 => vk::SampleCountFlags::TYPE_8,
-			MsaaCount::Sample16 => vk::SampleCountFlags::TYPE_16,
 		}
-	}	
+	}
 }
 
 impl Into<u32> for MsaaCount {
@@ -72,5 +84,16 @@ impl Into<vk::SampleCountFlags> for MsaaCount {
 	#[inline(always)]
 	fn into(self) -> vk::SampleCountFlags {
 		self.as_vk_sample_count()
+	}
+}
+
+impl From<vk::SampleCountFlags> for MsaaCount {
+	fn from(x: vk::SampleCountFlags) -> Self {
+		match x {
+			vk::SampleCountFlags::TYPE_2 => MsaaCount::Sample2,
+			vk::SampleCountFlags::TYPE_4 => MsaaCount::Sample4,
+			vk::SampleCountFlags::TYPE_8 => MsaaCount::Sample8,
+			_ => MsaaCount::Sample1,
+		}
 	}
 }

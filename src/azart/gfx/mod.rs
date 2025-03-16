@@ -8,6 +8,7 @@ pub mod image;
 mod command_buffer;
 mod graphics_pipeline;
 mod buffer;
+mod utils;
 
 pub use context::*;
 pub use image::*;

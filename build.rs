@@ -30,7 +30,7 @@ fn main() {
 			};
 
 			if !matches!(ext.to_str().unwrap(), "vert" | "frag" | "comp" | "geom" | "tese" | "tesc" | "mesh") {
-				println!("cargo:warning=Unsupported shader extension: \"{}\" for {}!", ext.display(), path.display());
+				println!("cargo:warning=Unsupported shader extension: \"{ext:?}\" for {path:?}!");
 				return None;
 			}
 

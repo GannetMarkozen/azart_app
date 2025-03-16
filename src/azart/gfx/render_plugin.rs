@@ -12,21 +12,21 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use super::{GpuContext, GpuContextHandle, SwapchainCreateInfo};
 use super::Swapchain;
 use ash::vk;
-use ash::vk::Pipeline;
+use ash::vk::{ImageUsageFlags, Pipeline};
+use image::GenericImageView;
 use crate::azart::gfx::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo};
 use crate::azart::gfx::image::{Image, ImageCreateInfo};
-use crate::azart::gfx::misc::ShaderPath;
+use crate::azart::gfx::misc::{MsaaCount, ShaderPath};
 use crate::azart::utils::debug_string::*;
-use crate::shader_path;
+use crate::{asset_path, shader_path};
+use crate::azart::gfx;
 
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
 	fn build(&self, app: &mut App) {
 		let event_loop = app.world().get_non_send_resource::<EventLoop<WakeUp>>().expect("event loop not found!");
-		let extensions = ash_window::enumerate_required_extensions(event_loop.display_handle()
-			.unwrap()
-			.as_raw())
+		let extensions = ash_window::enumerate_required_extensions(event_loop.display_handle().unwrap().as_raw())
 			.expect("Failed to enumerate required extensions!")
 			.iter()
 			.map(|&x| unsafe { CStr::from_ptr(x) })
@@ -47,10 +47,14 @@ impl Plugin for RenderPlugin {
 }
 
 #[derive(Resource)]
+pub struct Texture(pub Image);
+
+#[derive(Resource)]
 pub struct BasePass {
 	name: DebugString,
 	render_pass: vk::RenderPass,
 	frame_buffer: vk::Framebuffer,
+	msaa_color_attachment: Option<Image>,// Only set if msaa is enabled. color_attachment is the resolve image.
 	color_attachment: Image,
 	depth_attachment: Image,
 	context: Arc<GpuContext>,
@@ -61,12 +65,29 @@ impl BasePass {
 		name: DebugString,
 		context: Arc<GpuContext>,
 		resolution: UVec2,
+		msaa: MsaaCount,
 	) -> Self {
+		let msaa_color_attachment = match msaa.enabled() {
+			true => Some({
+				let create_info = ImageCreateInfo {
+					resolution,
+					format: vk::Format::R8G8B8A8_UNORM,
+					usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+					msaa,
+					..default()
+				};
+
+				Image::new(dbgfmt!("msaa_{name}_color_attachment"), Arc::clone(&context), &create_info)
+			}),
+			false => None,
+		};
+
 		let color_attachment = {
 			let create_info = ImageCreateInfo {
 				resolution,
 				format: vk::Format::R8G8B8A8_UNORM,
-				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+				msaa: MsaaCount::Sample1,// Always 1. If Msaa is enabled this is the resolve image.
 				..default()
 			};
 
@@ -78,6 +99,7 @@ impl BasePass {
 				resolution,
 				format: vk::Format::D32_SFLOAT,
 				usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+				msaa,
 				..default()
 			};
 			
@@ -85,20 +107,42 @@ impl BasePass {
 		};
 
 		let render_pass = {
-			let attachments = [
-				vk::AttachmentDescription::default()
-					.format(color_attachment.format)
-					.initial_layout(vk::ImageLayout::UNDEFINED)
-					.final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-					.load_op(vk::AttachmentLoadOp::CLEAR)// TODO: Conditionally use DONT_CARE on certain platforms perchance.
-					.samples(vk::SampleCountFlags::TYPE_1),
-				vk::AttachmentDescription::default()
-					.format(depth_attachment.format)
-					.initial_layout(vk::ImageLayout::UNDEFINED)
-					.final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-					.load_op(vk::AttachmentLoadOp::CLEAR)
-					.samples(vk::SampleCountFlags::TYPE_1),
-			];
+			let attachments = match &msaa_color_attachment {
+				Some(msaa_color_attachment) => vec![
+					vk::AttachmentDescription::default()
+						.format(msaa_color_attachment.format)
+						.initial_layout(vk::ImageLayout::UNDEFINED)
+						.final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+						.load_op(vk::AttachmentLoadOp::CLEAR)
+						.samples(msaa.as_vk_sample_count()),
+					vk::AttachmentDescription::default()
+						.format(depth_attachment.format)
+						.initial_layout(vk::ImageLayout::UNDEFINED)
+						.final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+						.load_op(vk::AttachmentLoadOp::CLEAR)
+						.samples(msaa.as_vk_sample_count()),
+					vk::AttachmentDescription::default()
+						.format(color_attachment.format)
+						.initial_layout(vk::ImageLayout::UNDEFINED)
+						.final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+						.load_op(vk::AttachmentLoadOp::DONT_CARE)
+						.samples(vk::SampleCountFlags::TYPE_1),
+				],
+				None => vec![
+					vk::AttachmentDescription::default()
+						.format(color_attachment.format)
+						.initial_layout(vk::ImageLayout::UNDEFINED)
+						.final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+						.load_op(vk::AttachmentLoadOp::CLEAR)// TODO: Conditionally use DONT_CARE on certain platforms perchance.
+						.samples(vk::SampleCountFlags::TYPE_1),
+					vk::AttachmentDescription::default()
+						.format(depth_attachment.format)
+						.initial_layout(vk::ImageLayout::UNDEFINED)
+						.final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+						.load_op(vk::AttachmentLoadOp::CLEAR)
+						.samples(vk::SampleCountFlags::TYPE_1),
+				]
+			};
 			
 			let color_attachment_ref = vk::AttachmentReference::default()
 				.attachment(0)
@@ -107,11 +151,33 @@ impl BasePass {
 			let depth_attachment_ref = vk::AttachmentReference::default()
 				.attachment(1)
 				.layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-			
-			let subpass = vk::SubpassDescription::default()
-				.pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-				.color_attachments(slice::from_ref(&color_attachment_ref))
-				.depth_stencil_attachment(&depth_attachment_ref);
+
+			// Only needed for Msaa.
+			let resolve_color_attachment_ref = vk::AttachmentReference::default()
+				.attachment(2)
+				.layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+			let color_attachments = match msaa.enabled() {
+				true => vec![
+					color_attachment_ref,
+					resolve_color_attachment_ref,
+				],
+				false => vec![
+					color_attachment_ref
+				],
+			};
+
+			let subpass = match msaa.enabled() {
+				true => vk::SubpassDescription::default()
+					.pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+					.color_attachments(&color_attachments)
+					.resolve_attachments(slice::from_ref(&resolve_color_attachment_ref))
+					.depth_stencil_attachment(&depth_attachment_ref),
+				false => vk::SubpassDescription::default()
+					.pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+					.color_attachments(&color_attachments)
+					.depth_stencil_attachment(&depth_attachment_ref),
+			};
 			
 			let dependencies = vk::SubpassDependency::default()
 				.src_subpass(vk::SUBPASS_EXTERNAL)
@@ -130,10 +196,17 @@ impl BasePass {
 		};
 		
 		let frame_buffer = {
-			let attachments = [
-				color_attachment.view,
-				depth_attachment.view,
-			];
+			let attachments = match &msaa_color_attachment {
+				Some(msaa_color_attachment) => vec![
+					msaa_color_attachment.view,
+					depth_attachment.view,
+					color_attachment.view,// color_attachment is the resolve image in this case.
+				],
+				None => vec![
+					color_attachment.view,
+					depth_attachment.view,
+				],
+			};
 			
 			let create_info = vk::FramebufferCreateInfo::default()
 				.render_pass(render_pass)
@@ -149,23 +222,65 @@ impl BasePass {
 			name,
 			render_pass,
 			frame_buffer,
+			msaa_color_attachment,
 			color_attachment,
 			depth_attachment,
 			context,
 		}
 	}
 
+	// Must ensure the resources being destroyed are not in use.
+	// TODO: Would be resolved with frame dependency reference-counting.
 	pub unsafe fn resize(&mut self, resolution: UVec2) {
 		self.context.device.destroy_framebuffer(self.frame_buffer, None);
 
-		let (color_attachment, depth_attachment) = Self::create_attachments(&self.name, Arc::clone(&self.context), resolution);
-		self.color_attachment = color_attachment;
-		self.depth_attachment = depth_attachment;
+		self.msaa_color_attachment = self.msaa_color_attachment.as_ref().map(|x| {
+			let create_info = ImageCreateInfo {
+				resolution,
+				format: x.format,
+				usage: x.usage,
+				msaa: x.msaa,
+				..default()
+			};
 
-		let attachments = [
-			self.color_attachment.view,
-			self.depth_attachment.view,
-		];
+			Image::new(x.name().clone(), Arc::clone(&self.context), &create_info)
+		});
+
+		self.color_attachment = {
+			let create_info = ImageCreateInfo {
+				resolution,
+				format: self.color_attachment.format,
+				usage: self.color_attachment.usage,
+				msaa: MsaaCount::Sample1,
+				..default()
+			};
+
+			Image::new(self.color_attachment.name().clone(), Arc::clone(&self.context), &create_info)
+		};
+
+		self.depth_attachment = {
+			let create_info = ImageCreateInfo {
+				resolution,
+				format: self.depth_attachment.format,
+				usage: self.depth_attachment.usage,
+				msaa: self.depth_attachment.msaa,
+				..default()
+			};
+
+			Image::new(self.depth_attachment.name().clone(), Arc::clone(&self.context), &create_info)
+		};
+
+		let attachments = match &self.msaa_color_attachment {
+			Some(msaa_color_attachment) => vec![
+				msaa_color_attachment.view,
+				self.depth_attachment.view,
+				self.color_attachment.view,
+			],
+			None => vec![
+				self.color_attachment.view,
+				self.depth_attachment.view,
+			],
+		};
 
 		let create_info = vk::FramebufferCreateInfo::default()
 			.render_pass(self.render_pass)
@@ -175,36 +290,6 @@ impl BasePass {
 			.layers(1);
 
 		self.frame_buffer = self.context.device.create_framebuffer(&create_info, None).unwrap();
-	}
-
-	fn create_attachments(
-		name: &DebugString,
-		context: Arc<GpuContext>,
-		resolution: UVec2
-	) -> (Image, Image) {
-		let color_attachment = {
-			let create_info = ImageCreateInfo {
-				resolution,
-				format: vk::Format::R8G8B8A8_UNORM,
-				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
-				..default()
-			};
-
-			Image::new(dbgfmt!("{name}_color_attachment"), Arc::clone(&context), &create_info)
-		};
-
-		let depth_attachment = {
-			let create_info = ImageCreateInfo {
-				resolution,
-				format: vk::Format::D32_SFLOAT,
-				usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-				..default()
-			};
-
-			Image::new(dbgfmt!("{name}_depth_stencil"), context, &create_info)
-		};
-
-		(color_attachment, depth_attachment)
 	}
 }
 
@@ -242,7 +327,6 @@ fn render(
 			let (new_frame_index, suboptimal) = swapchain.acquire_next_image();
 			
 			let previous_frame = &swapchain.frames()[previous_frame_index];
-			let new_frame = &swapchain.frames()[new_frame_index];
 
 			let cmd = previous_frame.graphics_command_buffer;
 			context.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
@@ -302,32 +386,42 @@ unsafe fn record(
 ) {
 	// Begin render pass.
 	{
+		let attachment_count = match &base_pass.msaa_color_attachment {
+			Some(_) => 3,
+			None => 2,
+		};
+		
+		let clear_values = (0..attachment_count)
+			.map(|_| vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } })
+			.collect::<Vec<_>>();
+		
+		let UVec2 { x: width, y: height } = swapchain.extent();
+		
 		let begin_info = vk::RenderPassBeginInfo::default()
 			.render_pass(base_pass.render_pass)
 			.framebuffer(base_pass.frame_buffer)
 			.render_area(vk::Rect2D {
 				extent: vk::Extent2D {
-					width: swapchain.extent().x,
-					height: swapchain.extent().y,
+					width,
+					height,
 				},
 				..default()
 			})
-			.clear_values(&[
-				vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } },
-				vk::ClearValue { color: vk::ClearColorValue { float32: [1.0, 1.0, 1.0, 1.0] } },
-			]);
+			.clear_values(&clear_values);
 
 		context.device.cmd_begin_render_pass(cmd, &begin_info, vk::SubpassContents::INLINE);
 	}
 	
 	// Set viewport
 	{
+		let UVec2 { x: width, y: height } = swapchain.extent();
+		
 		let viewports = [
 			vk::Viewport::default()
-				.width(swapchain.extent().x as f32)
-				.height(swapchain.extent().y as f32)
-				.min_depth(0.0)
-				.max_depth(1.0),
+				.width(width as f32)
+				.height(height as f32)
+				.min_depth(1.0)// Reverse-Z for better precision afar.
+				.max_depth(0.0),
 		];
 		
 		context.device.cmd_set_viewport(cmd, 0, &viewports);
@@ -396,22 +490,70 @@ fn create_render_pass_on_primary_window_spawned(
 		let Ok(window) = query.get(e) else {
 			continue;
 		};
-		
-		let base_pass = BasePass::new("base_pass".into(), Arc::clone(&context), window.resolution.physical_size());
+
+		const MSAA: MsaaCount = MsaaCount::Sample8;
+		let base_pass = BasePass::new("base_pass".into(), Arc::clone(&context), window.resolution.physical_size(), MSAA);
 		
 		let base_material = BaseMaterial {
 			pipeline: {
 				let create_info = GraphicsPipelineCreateInfo {
 					vertex_shader: shader_path!("shader.vert"),
 					fragment_shader: shader_path!("shader.frag"),
+					msaa: MSAA,
 				};
 				
 				unsafe { GraphicsPipeline::new("base_material".into(), Arc::clone(&context), base_pass.render_pass, &create_info) }
 			},
 		};
 
+		let texture = {
+			let path = asset_path!("models/FlightHelmet/FlightHelmet_Materials_MetalPartsMat_BaseColor.png");
+			let png_data = std::fs::read(path)
+				.unwrap_or_else(|e| panic!("Failed to read data path {path}. Error: {e}"));
+
+			let png = image::load_from_memory(&png_data).unwrap();
+
+			use image::DynamicImage::*;
+			let format = match &png {
+				ImageLuma8(_) | ImageLumaA8(_) => vk::Format::R8_UNORM,
+				ImageLuma16(_) | ImageLumaA16(_) => vk::Format::R16_UNORM,
+				ImageRgb8(_) => vk::Format::R8G8B8_UNORM,
+				ImageRgb16(_) => vk::Format::R16G16B16_UNORM,
+				ImageRgb32F(_) => vk::Format::R32G32B32_SFLOAT,
+				ImageRgba8(_)	=> vk::Format::R8G8B8A8_UNORM,
+				ImageRgba16(_) => vk::Format::R16G16B16A16_UNORM,
+				ImageRgba32F(_) => vk::Format::R32G32B32A32_SFLOAT,
+				_ => unreachable!("Unsupported image format {png:?}!"),
+			};
+
+			let create_info = ImageCreateInfo {
+				resolution: UVec2::new(png.width(), png.height()),
+				format: vk::Format::R8G8B8A8_UNORM,
+				usage: ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST,
+				msaa: MsaaCount::Sample1,
+				..default()
+			};
+
+			let image = Image::new("texture".into(), Arc::clone(&context), &create_info);
+
+			context.upload_image(&image, |data| {
+				png
+					.pixels()
+					.zip(data.chunks_exact_mut(4))
+					.for_each(|((_, _, image::Rgba([r, g, b, a])), data)| {
+						data[0] = r;
+						data[1] = g;
+						data[2] = b;
+						data[3] = a;
+					});
+			});
+
+			Texture(image)
+		};
+
 		commands.insert_resource(base_pass);
 		commands.insert_resource(base_material);
+		commands.insert_resource(texture);
 	}
 }
 
@@ -437,6 +579,7 @@ fn create_swapchain_on_window_spawned(
 			let create_info = SwapchainCreateInfo {
 				present_mode: window.present_mode,
 				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+				image_count: 2,
 				..default()
 			};
 			

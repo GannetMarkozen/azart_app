@@ -68,7 +68,7 @@ macro_rules! dbgfmt {
 
 #[macro_export]
 #[cfg(not(debug_assertions))]
-macro_rules! dformat {
+macro_rules! dbgfmt {
 	($($arg:tt)*) => {
 		DebugString::default()
 	}

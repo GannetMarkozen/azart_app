@@ -1,15 +1,17 @@
 use bevy::{prelude::*, a11y::AccessibilityPlugin};
-use bevy::gltf::GltfPlugin;
+use bevy::diagnostic::{DiagnosticsPlugin, FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::input::InputPlugin;
-use bevy::input::keyboard::KeyboardInput;
 use bevy::log::LogPlugin;
 use bevy::MinimalPlugins;
+use bevy::window::PresentMode;
 use bevy::winit::{WakeUp, WinitPlugin};
 use crate::azart::gfx::render_plugin::RenderPlugin;
 
 pub mod gfx;
-mod utils;
-//mod window;
+pub mod utils;
+pub mod mesh;
+pub mod prelude;
+pub mod assets;
 
 pub struct AzartPlugin;
 
@@ -18,11 +20,11 @@ impl Plugin for AzartPlugin {
 		app
 			.add_plugins(MinimalPlugins)
 			.add_plugins(AssetPlugin::default())
-			.add_plugins(GltfPlugin::default())
 			.add_plugins(InputPlugin::default())
 			.add_plugins(WindowPlugin {
 				primary_window: Some(Window {
-					title: "Azart".to_owned(),
+					title: "azart".to_owned(),
+					present_mode: PresentMode::Mailbox,
 					..default()
 				}),
 				..default()
@@ -31,5 +33,8 @@ impl Plugin for AzartPlugin {
 			.add_plugins(AccessibilityPlugin)
 			.add_plugins(LogPlugin::default())
 			.add_plugins(RenderPlugin);
+		
+		//#[cfg(debug_assertions)]
+		app.add_plugins((FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin::default(), DiagnosticsPlugin));
 	}
 }

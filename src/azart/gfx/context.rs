@@ -2,17 +2,24 @@ use std::ffi::{c_char, CStr, CString};
 use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::num::NonZero;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
+use std::{mem, ptr, slice};
 use std::sync::{Arc, Mutex};
 use ash::vk;
 use bevy::log::warn;
+use bevy::math::UVec2;
 use bevy::prelude::Resource;
 use bevy::tasks::IoTaskPool;
 use bevy::utils::HashSet;
-use gpu_allocator::{AllocationSizes, AllocatorDebugSettings};
-use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
+use gpu_allocator::{AllocationSizes, AllocatorDebugSettings, MemoryLocation};
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc};
 use thiserror::Error;
-use crate::azart::gfx::misc::ShaderPath;
+use crate::azart::gfx;
+use crate::azart::gfx::buffer::Buffer;
+use crate::azart::gfx::Image;
+use crate::azart::gfx::misc::{MsaaCount, ShaderPath};
+use crate::azart::utils::debug_string::DebugString;
+use crate::dbgfmt;
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
@@ -21,6 +28,7 @@ pub struct GpuContext {
 	pub device: ash::Device,
 	pub queue_families: QueueFamilies,
 	pub extensions: Extensions,
+	pub capabilities: Capabilities,
 	pub(crate) allocator: ManuallyDrop<Mutex<Allocator>>,
 }
 
@@ -37,8 +45,8 @@ impl GpuContext {
 
 	const DEVICE_EXTENSION_NAMES: [&'static CStr; 8] = [
 		ash::ext::descriptor_indexing::NAME,
-		ash::ext::extended_dynamic_state::NAME,
 		ash::khr::buffer_device_address::NAME,
+		ash::ext::extended_dynamic_state::NAME,
 		ash::khr::swapchain::NAME,
 		ash::khr::multiview::NAME,
 		ash::khr::draw_indirect_count::NAME,
@@ -253,6 +261,22 @@ impl GpuContext {
 				Allocator::new(&create_info).unwrap()
 			};
 
+			let capabilities = Capabilities {
+				max_msaa: {
+					let props = instance.get_physical_device_properties(physical_device);
+					let mask = props.limits.framebuffer_color_sample_counts & props.limits.framebuffer_depth_sample_counts;
+					if mask.contains(vk::SampleCountFlags::TYPE_8) {
+						MsaaCount::Sample8
+					} else if mask.contains(vk::SampleCountFlags::TYPE_4) {
+						MsaaCount::Sample4
+					} else if mask.contains(vk::SampleCountFlags::TYPE_2) {
+						MsaaCount::Sample2
+					} else {
+						MsaaCount::Sample1
+					}
+				},
+			};
+
 			Self {
 				entry,
 				instance,
@@ -260,17 +284,26 @@ impl GpuContext {
 				device,
 				queue_families,
 				extensions,
+				capabilities,
 				allocator: ManuallyDrop::new(Mutex::new(allocator)),
 			}
 		}
 	}
 
-	pub fn alloc(&self, create_info: &gpu_allocator::vulkan::AllocationCreateDesc) -> Allocation {
-		self.allocator.lock().unwrap().allocate(&create_info).expect("Failed to allocate memory!")
+	pub fn alloc(&self, create_info: &AllocationCreateDesc) -> Allocation {
+		self.allocator
+			.lock()
+			.unwrap()
+			.allocate(&create_info)
+			.unwrap_or_else(|e| panic!("Failed to allocate memory for {} with create_info: {create_info:?}. Error: {:?}", create_info.name, e))
 	}
 
 	pub fn dealloc(&self, allocation: Allocation) {
-		self.allocator.lock().unwrap().free(allocation).expect("Failed to deallocate allocation!");
+		self.allocator
+			.lock()
+			.unwrap()
+			.free(allocation)
+			.unwrap_or_else(|e| panic!("Failed to free memory. Error: {:?}", e));
 	}
 
 	pub unsafe fn cmd_transition_image_layout(
@@ -296,7 +329,7 @@ impl GpuContext {
 			src_stage,
 			dst_stage
 		) = match (old_layout, new_layout) {
-			(ImageLayout::UNDEFINED, ImageLayout::TRANSFER_DST_OPTIMAL) => (
+			(ImageLayout::UNDEFINED, ImageLayout::TRANSFER_SRC_OPTIMAL | ImageLayout::TRANSFER_DST_OPTIMAL) => (
 				AccessFlags::empty(),
 				AccessFlags::TRANSFER_WRITE,
 				PipelineStageFlags::TOP_OF_PIPE,
@@ -347,6 +380,241 @@ impl GpuContext {
 
 		unsafe { self.device.cmd_pipeline_barrier(cmd, src_stage, dst_stage, vk::DependencyFlags::empty(), &[], &[], &[barrier]); }
 	}
+	
+	// @NOTE: Insanely unoptimized atm.
+	pub fn one_time_cmd<T>(&self, queue_family: u32, closure: impl FnOnce(vk::CommandBuffer) -> T) -> T {
+		assert!(queue_family == self.queue_families.graphics || queue_family == self.queue_families.compute || queue_family == self.queue_families.transfer);
+		
+		let command_pool = {
+			let create_info = vk::CommandPoolCreateInfo::default()
+				.queue_family_index(self.queue_families.graphics);
+			
+			unsafe { self.device.create_command_pool(&create_info, None).expect("Failed to create command pool!") }
+		};
+		
+		let cmd = {
+			let create_info = vk::CommandBufferAllocateInfo::default()
+				.command_pool(command_pool)
+				.level(vk::CommandBufferLevel::PRIMARY)
+				.command_buffer_count(1);
+			
+			unsafe { self.device.allocate_command_buffers(&create_info) }.expect("Failed to allocate command buffer!")[0]
+		};
+		
+		// Begin.
+		unsafe {
+			let begin_info = vk::CommandBufferBeginInfo::default()
+				.flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+			
+			self.device.begin_command_buffer(cmd, &begin_info).expect("Failed to begin command buffer!");
+		}
+		
+		let result = closure(cmd);
+		
+		// End
+		unsafe { self.device.end_command_buffer(cmd) }.unwrap();
+		
+		let one_time_submit_fence = {
+			let create_info = vk::FenceCreateInfo::default();
+			unsafe { self.device.create_fence(&create_info, None).expect("Failed to create fence!") }
+		};
+		
+		// Upload to queue.
+		{
+			let submit_info = vk::SubmitInfo::default()
+				.command_buffers(slice::from_ref(&cmd));
+			
+			let queue = unsafe { self.device.get_device_queue(queue_family, 0) };
+			
+			unsafe { self.device.queue_submit(queue, slice::from_ref(&submit_info), one_time_submit_fence) }.expect("Failed to submit command buffer!");
+		};
+		
+		// Wait for all queued commands to finish.
+		unsafe { self.device.wait_for_fences(slice::from_ref(&one_time_submit_fence), true, u64::MAX) }.unwrap();
+		
+		// Wait for submit to complete.
+		unsafe {
+			self.device.destroy_fence(one_time_submit_fence, None);
+			self.device.free_command_buffers(command_pool, slice::from_ref(&cmd));
+			self.device.destroy_command_pool(command_pool, None);
+		}
+		
+		result
+	}
+	
+	pub fn upload_buffer<T: bytemuck::NoUninit + bytemuck::AnyBitPattern, R>(&self, buffer: &Buffer, closure: impl FnOnce(&mut [T]) -> R) -> R {
+		let staging_buffer = {
+			let create_info = vk::BufferCreateInfo::default()
+				.usage(vk::BufferUsageFlags::TRANSFER_SRC)
+				.size(buffer.size() as u64)
+				.queue_family_indices(slice::from_ref(&self.queue_families.transfer))
+				.sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+			unsafe { self.device.create_buffer(&create_info, None) }.unwrap()
+		};
+
+		let allocation = {
+			let (requirements, dedicated_allocation) = {
+				let info = vk::BufferMemoryRequirementsInfo2::default()
+					.buffer(staging_buffer);
+
+				let mut requirements = vk::MemoryRequirements2::default();
+				let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
+				requirements.push_next(&mut dedicated_requirements);
+
+				unsafe { self.device.get_buffer_memory_requirements2(&info, &mut requirements); }
+				(requirements.memory_requirements, dedicated_requirements.prefers_dedicated_allocation == vk::TRUE)
+			};
+
+			let allocation_scheme = match dedicated_allocation {
+				true => AllocationScheme::DedicatedBuffer(staging_buffer),
+				false => AllocationScheme::GpuAllocatorManaged,
+			};
+
+			let name = dbgfmt!("staging_buffer_{}", buffer.name().as_str());
+			let create_info = AllocationCreateDesc {
+				name: name.as_str(),
+				requirements,
+				location: MemoryLocation::CpuToGpu,
+				linear: true,
+				allocation_scheme,
+			};
+
+			self.alloc(&create_info)
+		};
+
+		unsafe { self.device.bind_buffer_memory(staging_buffer, allocation.memory(), allocation.offset()) }.expect("Failed to bind buffer memory!");
+		
+		let memory = bytemuck::cast_slice_mut::<_, T>(unsafe {
+			let memory = mem::transmute::<_, *mut u8>(allocation.memory()).add(allocation.offset() as usize);
+			slice::from_raw_parts_mut(memory, buffer.size())
+		});
+		
+		let result = closure(memory);
+		
+		self.one_time_cmd(self.queue_families.transfer, |cmd| {
+			let regions = [
+				vk::BufferCopy::default()
+					.src_offset(0)
+					.dst_offset(0)
+					.size(buffer.size() as u64),
+			];
+			
+			unsafe { self.device.cmd_copy_buffer(cmd, staging_buffer, buffer.handle, &regions); }
+		});
+		
+		unsafe {
+			self.device.destroy_buffer(staging_buffer, None);
+			self.dealloc(allocation);
+		}
+		
+		result
+	}
+	
+	pub fn upload_image<T>(&self, image: &Image, closure: impl FnOnce(&mut [u8]) -> T) -> T {
+		assert_ne!(image.resolution, UVec2::ZERO, "Image {} must have a non-zero resolution!", image.name());
+		assert!(image.usage.contains(vk::ImageUsageFlags::TRANSFER_DST), "Image {} must be created with the TRANSFER_DST usage flag!", image.name());
+		assert_eq!(image.msaa, MsaaCount::Sample1, "Can not upload Msaa target image with sample count {:?}!", image.msaa);
+		
+		let staging_image = {
+			let create_info = vk::ImageCreateInfo::default()
+				.image_type(vk::ImageType::TYPE_2D)
+				.extent(vk::Extent3D::default()
+					.width(image.resolution.x)
+					.height(image.resolution.y)
+					.depth(1)
+				)
+				.mip_levels(1)
+				.array_layers(1)
+				.format(image.format)
+				.samples(vk::SampleCountFlags::TYPE_1)
+				.tiling(vk::ImageTiling::LINEAR)
+				.usage(vk::ImageUsageFlags::TRANSFER_SRC)
+				.sharing_mode(vk::SharingMode::EXCLUSIVE)
+				.initial_layout(vk::ImageLayout::UNDEFINED);
+			
+			unsafe { self.device.create_image(&create_info, None) }.unwrap()
+		};
+		
+		let allocation = {
+			let (requirements, dedicated_allocation) = {
+				let info = vk::ImageMemoryRequirementsInfo2::default()
+					.image(staging_image);
+
+				let mut requirements = vk::MemoryRequirements2::default();
+				let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
+				requirements.push_next(&mut dedicated_requirements);
+
+				unsafe { self.device.get_image_memory_requirements2(&info, &mut requirements); }
+				(requirements.memory_requirements, dedicated_requirements.prefers_dedicated_allocation == vk::TRUE)
+			};
+
+			let allocation_scheme = match dedicated_allocation {
+				true => AllocationScheme::DedicatedImage(staging_image),
+				false => AllocationScheme::GpuAllocatorManaged,
+			};
+			
+			let name = dbgfmt!("staging_image_{}", image.name().as_str());
+			let create_info = AllocationCreateDesc {
+				name: name.as_str(),
+				requirements,
+				location: MemoryLocation::CpuToGpu,
+				linear: true,
+				allocation_scheme,
+			};
+			
+			self.alloc(&create_info)
+		};
+
+		unsafe { self.device.bind_image_memory(staging_image, allocation.memory(), allocation.offset()) }.expect("Failed to bind image memory!");
+
+		let memory = unsafe {
+			let memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+			slice::from_raw_parts_mut(memory, allocation.size() as usize)
+		};
+		
+		let result = closure(memory);
+		
+		self.one_time_cmd(self.queue_families.transfer, |cmd| {
+			unsafe {
+				self.cmd_transition_image_layout(cmd, staging_image, image.format, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, 1);
+				self.cmd_transition_image_layout(cmd, image.handle, image.format, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1);
+			}
+			
+			let regions = [
+				vk::ImageCopy::default()
+					.extent(vk::Extent3D::default()
+						.width(image.resolution.x)
+						.height(image.resolution.y)
+						.depth(1)
+					)
+					.src_subresource(vk::ImageSubresourceLayers::default()
+						.aspect_mask(vk::ImageAspectFlags::COLOR)
+						.mip_level(0)
+						.base_array_layer(0)
+						.layer_count(1)
+					)
+					.dst_subresource(vk::ImageSubresourceLayers::default()
+						.aspect_mask(vk::ImageAspectFlags::COLOR)
+						.mip_level(0)
+						.base_array_layer(0)
+						.layer_count(1)
+					)
+			];
+			
+			unsafe { self.device.cmd_copy_image(cmd, staging_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions); }
+			
+			// Transition image back to original layout.
+			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, 1); }
+		});
+		
+		unsafe {
+			self.device.destroy_image(staging_image, None);
+			self.dealloc(allocation);
+		}
+		
+		result
+	}
 
 	pub fn create_shader_module(&self, path: ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
 		#[cfg(debug_assertions)]
@@ -366,23 +634,29 @@ impl GpuContext {
 		let mut code = vec![];
 		file.read_to_end(&mut code).unwrap();
 
-		let code = bytemuck::cast_slice(&code);
-
 		let shader_module = {
 			let create_info = vk::ShaderModuleCreateInfo::default()
-				.code(&code);
+				.code(bytemuck::cast_slice(&code));
 
 			unsafe { self.device.create_shader_module(&create_info, None) }.expect("Failed to create shader module!")
 		};
 
 		Ok(ShaderModule {
 			handle: shader_module,
+			code,
 			context: &self,
 		})
 	}
 
 	pub fn wait_idle(&self) {
 		unsafe { self.device.device_wait_idle().expect("Failed to wait for device to become idle!"); }
+	}
+
+	pub fn max_msaa_samples(&self) -> MsaaCount {
+		let props = unsafe { self.instance.get_physical_device_properties(self.physical_device) };
+		let sample_count = props.limits.framebuffer_color_sample_counts & props.limits.framebuffer_depth_sample_counts;
+		let sample_count = vk::SampleCountFlags::from_raw(1 << sample_count.as_raw().trailing_zeros());// Use the smallest available sample count.
+		sample_count.into()
 	}
 
 	// Handle must be valid and ensure this is only called from a single thread per-object!
@@ -426,6 +700,10 @@ pub struct Extensions {
 	pub debug_utils: ash::ext::debug_utils::Device,
 }
 
+pub struct Capabilities {
+	pub max_msaa: MsaaCount,
+}
+
 // Bevy Resource that holds an Arc<GpuContext>.
 #[derive(Resource)]
 pub struct GpuContextHandle(pub Arc<GpuContext>);
@@ -446,6 +724,7 @@ impl Deref for GpuContextHandle {
 
 pub struct ShaderModule<'a> {
 	pub handle: vk::ShaderModule,
+	pub code: Vec<u8>,
 	pub(crate) context: &'a GpuContext,
 }
 

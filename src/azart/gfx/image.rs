@@ -6,9 +6,11 @@ use bevy::math::UVec2;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use crate::azart::gfx::GpuContext;
+use crate::azart::gfx::misc::{MsaaCount, GpuResource};
 use crate::azart::utils::debug_string::DebugString;
 
 pub struct Image {
+	name: DebugString,
 	pub(crate) handle: vk::Image,
 	pub(crate) view: vk::ImageView,
 	pub(crate) allocation: ManuallyDrop<Allocation>,
@@ -16,6 +18,7 @@ pub struct Image {
 	pub(crate) format: vk::Format,
 	pub(crate) usage: vk::ImageUsageFlags,
 	pub(crate) layout: vk::ImageLayout,
+	pub(crate) msaa: MsaaCount,
 	context: Arc<GpuContext>,
 }
 
@@ -53,7 +56,7 @@ impl Image {
 				.array_layers(1)
 				.format(create_info.format)
 				.flags(flags)
-				.samples(vk::SampleCountFlags::TYPE_1)
+				.samples(create_info.msaa.as_vk_sample_count())
 				.tiling(create_info.tiling)
 				.usage(create_info.usage)
 				.sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -120,6 +123,7 @@ impl Image {
 		}
 
 		Self {
+			name,
 			handle: image,
 			view: image_view,
 			allocation: ManuallyDrop::new(allocation),
@@ -127,8 +131,14 @@ impl Image {
 			format: create_info.format,
 			usage: create_info.usage,
 			layout: create_info.initial_layout,
+			msaa: create_info.msaa,
 			context,
 		}
+	}
+	
+	#[inline(always)]
+	pub fn name(&self) -> &DebugString {
+		&self.name
 	}
 }
 
@@ -150,6 +160,7 @@ pub struct ImageCreateInfo {
 	pub usage: vk::ImageUsageFlags,
 	pub initial_layout: vk::ImageLayout,
 	pub tiling: vk::ImageTiling,
+	pub msaa: MsaaCount,
 	pub array_layers: u32,
 	pub memory: MemoryLocation,
 }
@@ -163,8 +174,11 @@ impl Default for ImageCreateInfo {
 			usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 			initial_layout: vk::ImageLayout::UNDEFINED,
 			tiling: vk::ImageTiling::OPTIMAL,
+			msaa: MsaaCount::Sample1,
 			array_layers: 1,
 			memory: MemoryLocation::GpuOnly,
 		}
 	}
 }
+
+impl GpuResource for ImageCreateInfo {}

@@ -6,8 +6,10 @@ use crate::azart::gfx::GpuContext;
 use crate::azart::utils::debug_string::DebugString;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
+use crate::azart::gfx::misc::GpuResource;
 
 pub struct Buffer {
+	pub(crate) name: DebugString,
 	pub(crate) handle: vk::Buffer,
 	pub(crate) allocation: ManuallyDrop<Allocation>,
 	pub(crate) context: Arc<GpuContext>,
@@ -68,6 +70,7 @@ impl Buffer {
 		}
 
 		Self {
+			name,
 			handle: buffer,
 			allocation: ManuallyDrop::new(allocation),
 			context,
@@ -77,6 +80,11 @@ impl Buffer {
 	#[inline(always)]
 	pub fn size(&self) -> usize {
 		self.allocation.size() as usize
+	}
+	
+	#[inline(always)]
+	pub fn name(&self) -> &DebugString {
+		&self.name
 	}
 }
 
@@ -88,6 +96,8 @@ impl Drop for Buffer {
 		}
 	}
 }
+
+impl GpuResource for Buffer {}
 
 pub struct BufferCreateInfo {
 	pub size: usize,
