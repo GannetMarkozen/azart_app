@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use ash::vk;
-use crate::azart::gfx::GpuContext;
-use crate::azart::gfx::misc::MsaaCount;
-use crate::azart::utils::debug_string::DebugString;
+use crate::GpuContext;
+use azart_gfx_utils::MsaaCount;
+use azart_utils::debug_string::DebugString;
 
 pub struct RenderPass {
 	name: DebugString,

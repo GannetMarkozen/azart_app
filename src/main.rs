@@ -1,7 +1,4 @@
-mod azart;
-
 use azart::*;
-
 use bevy::prelude::*;
 
 fn main() {

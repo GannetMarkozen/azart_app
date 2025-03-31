@@ -12,16 +12,21 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use super::{GpuContext, GpuContextHandle, SwapchainCreateInfo};
 use super::Swapchain;
 use ash::vk;
-use ash::vk::{ImageUsageFlags, Pipeline};
+use bevy::reflect::{DynamicTypePath, TypeRegistry};
 use image::GenericImageView;
-use crate::azart::gfx::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo};
-use crate::azart::gfx::image::{Image, ImageCreateInfo};
-use crate::azart::gfx::misc::{MsaaCount, ShaderPath};
-use crate::azart::utils::debug_string::*;
-use crate::{asset_path, shader_path};
-use crate::azart::gfx;
+use crate::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo, VertexAttribute, VertexInput};
+use crate::image::{Image, ImageCreateInfo};
+use azart_gfx_utils::{MsaaCount, ShaderPath};
+use azart_utils::debug_string::*;
+use azart_gfx_utils::{asset_path, shader_path};
 
 pub struct RenderPlugin;
+
+#[derive(Reflect)]
+pub struct Something {
+	pub value: u32,
+	pub nothing: String,
+}
 
 impl Plugin for RenderPlugin {
 	fn build(&self, app: &mut App) {
@@ -305,6 +310,8 @@ impl Drop for BasePass {
 #[derive(Resource)]
 pub struct BaseMaterial {
 	pipeline: GraphicsPipeline,
+	descriptor_pool: vk::DescriptorPool,
+	descriptor_set: vk::DescriptorSet,
 }
 
 fn init(
@@ -442,6 +449,9 @@ unsafe fn record(
 		context.device.cmd_set_scissor(cmd, 0, &scissors);
 	}
 
+	// Bind descriptor set.
+	context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.layout, 0, slice::from_ref(&base_material.descriptor_set), &[]);
+	
 	context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.handle);
 	context.device.cmd_draw(cmd, 3, 1, 0, 0);
 
@@ -493,43 +503,42 @@ fn create_render_pass_on_primary_window_spawned(
 
 		const MSAA: MsaaCount = MsaaCount::Sample8;
 		let base_pass = BasePass::new("base_pass".into(), Arc::clone(&context), window.resolution.physical_size(), MSAA);
-		
-		let base_material = BaseMaterial {
-			pipeline: {
-				let create_info = GraphicsPipelineCreateInfo {
-					vertex_shader: shader_path!("shader.vert"),
-					fragment_shader: shader_path!("shader.frag"),
-					msaa: MSAA,
-				};
-				
-				unsafe { GraphicsPipeline::new("base_material".into(), Arc::clone(&context), base_pass.render_pass, &create_info) }
-			},
+
+		let pipeline = {
+			let create_info = GraphicsPipelineCreateInfo {
+				vertex_shader: &shader_path("shader.vert"),
+				fragment_shader: &shader_path("shader.frag"),
+				vertex_inputs: &[],
+				msaa: MSAA,
+			};
+
+			unsafe { GraphicsPipeline::new("base_material".into(), Arc::clone(&context), base_pass.render_pass, &create_info) }
+		};
+
+		let descriptor_pool = {
+			let pool_sizes = [
+				vk::DescriptorPoolSize::default()
+					.ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+					.descriptor_count(1)
+			];
+
+			let create_info = vk::DescriptorPoolCreateInfo::default()
+				.max_sets(1)
+				.pool_sizes(&pool_sizes);
+
+			unsafe { context.device.create_descriptor_pool(&create_info, None) }.unwrap()
 		};
 
 		let texture = {
-			let path = asset_path!("models/FlightHelmet/FlightHelmet_Materials_MetalPartsMat_BaseColor.png");
-			let png_data = std::fs::read(path)
-				.unwrap_or_else(|e| panic!("Failed to read data path {path}. Error: {e}"));
+			let path = asset_path("models/FlightHelmet/FlightHelmet_Materials_MetalPartsMat_OcclusionRoughMetal.png");
+			let png_data = std::fs::read(&*path)
+				.unwrap_or_else(|e| panic!("Failed to read data path {path:?}. Error: {e}"));
 
 			let png = image::load_from_memory(&png_data).unwrap();
-
-			use image::DynamicImage::*;
-			let format = match &png {
-				ImageLuma8(_) | ImageLumaA8(_) => vk::Format::R8_UNORM,
-				ImageLuma16(_) | ImageLumaA16(_) => vk::Format::R16_UNORM,
-				ImageRgb8(_) => vk::Format::R8G8B8_UNORM,
-				ImageRgb16(_) => vk::Format::R16G16B16_UNORM,
-				ImageRgb32F(_) => vk::Format::R32G32B32_SFLOAT,
-				ImageRgba8(_)	=> vk::Format::R8G8B8A8_UNORM,
-				ImageRgba16(_) => vk::Format::R16G16B16A16_UNORM,
-				ImageRgba32F(_) => vk::Format::R32G32B32A32_SFLOAT,
-				_ => unreachable!("Unsupported image format {png:?}!"),
-			};
-
 			let create_info = ImageCreateInfo {
 				resolution: UVec2::new(png.width(), png.height()),
 				format: vk::Format::R8G8B8A8_UNORM,
-				usage: ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST,
+				usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 				msaa: MsaaCount::Sample1,
 				..default()
 			};
@@ -540,20 +549,68 @@ fn create_render_pass_on_primary_window_spawned(
 				png
 					.pixels()
 					.zip(data.chunks_exact_mut(4))
-					.for_each(|((_, _, image::Rgba([r, g, b, a])), data)| {
-						data[0] = r;
-						data[1] = g;
-						data[2] = b;
-						data[3] = a;
-					});
+					.for_each(|((_, _, image::Rgba(rgba)), data)| data.copy_from_slice(&rgba));
 			});
 
-			Texture(image)
+			image
+		};
+
+		let descriptor_set = {
+			assert_eq!(pipeline.descriptor_set_layouts.len(), 1);
+
+			let allocate_info = vk::DescriptorSetAllocateInfo::default()
+				.descriptor_pool(descriptor_pool)
+				.set_layouts(&pipeline.descriptor_set_layouts);
+
+			let descriptor_set = unsafe { context.device.allocate_descriptor_sets(&allocate_info) }.unwrap()[0];
+
+			let sampler = {
+				let create_info = vk::SamplerCreateInfo::default()
+					.mag_filter(vk::Filter::LINEAR) // Smooth magnification
+					.min_filter(vk::Filter::LINEAR) // Smooth minification
+					.mipmap_mode(vk::SamplerMipmapMode::LINEAR) // Trilinear filtering
+					.address_mode_u(vk::SamplerAddressMode::REPEAT) // Wrap in U direction
+					.address_mode_v(vk::SamplerAddressMode::REPEAT) // Wrap in V direction
+					.address_mode_w(vk::SamplerAddressMode::REPEAT) // Wrap in W direction
+					.mip_lod_bias(0.0) // No LOD bias
+					.anisotropy_enable(false) // Enable anisotropic filtering
+					.max_anisotropy(16.0) // Use max anisotropy (ensure device supports it)
+					.compare_enable(false) // No depth comparison
+					.min_lod(0.0) // Minimum mip level
+					.max_lod(vk::LOD_CLAMP_NONE)
+					.border_color(vk::BorderColor::FLOAT_OPAQUE_BLACK) // Border color (only for CLAMP modes)
+					.unnormalized_coordinates(false); // Use normalized texture coordinates
+
+				unsafe { context.device.create_sampler(&create_info, None) }.unwrap()
+			};
+
+			let image_info = vk::DescriptorImageInfo::default()
+				.sampler(sampler)
+				.image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+				.image_view(texture.view);
+
+			let descriptor_writes = [
+				vk::WriteDescriptorSet::default()
+					.dst_set(descriptor_set)
+					.dst_binding(0)
+					.descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+					.image_info(slice::from_ref(&image_info))
+			];
+
+			unsafe { context.device.update_descriptor_sets(&descriptor_writes, &[]); }
+
+			descriptor_set
+		};
+
+		let base_material = BaseMaterial {
+			pipeline,
+			descriptor_pool,
+			descriptor_set,
 		};
 
 		commands.insert_resource(base_pass);
 		commands.insert_resource(base_material);
-		commands.insert_resource(texture);
+		commands.insert_resource(Texture(texture));
 	}
 }
 

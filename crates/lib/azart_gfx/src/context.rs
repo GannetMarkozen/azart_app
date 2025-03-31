@@ -1,25 +1,29 @@
-use std::ffi::{c_char, CStr, CString};
-use std::io::Read;
+use std::ffi::{c_char, CStr, CString, OsStr};
+use std::io::{BufReader, Read};
 use std::mem::ManuallyDrop;
 use std::num::NonZero;
 use std::ops::{Deref, Range};
 use std::{mem, ptr, slice};
+use std::any::TypeId;
 use std::sync::{Arc, Mutex};
 use ash::vk;
 use bevy::log::warn;
 use bevy::math::UVec2;
-use bevy::prelude::Resource;
+use bevy::prelude::{FromReflect, PartialReflect, Resource};
 use bevy::tasks::IoTaskPool;
 use bevy::utils::HashSet;
 use gpu_allocator::{AllocationSizes, AllocatorDebugSettings, MemoryLocation};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc};
 use thiserror::Error;
-use crate::azart::gfx;
-use crate::azart::gfx::buffer::Buffer;
-use crate::azart::gfx::Image;
-use crate::azart::gfx::misc::{MsaaCount, ShaderPath};
-use crate::azart::utils::debug_string::DebugString;
-use crate::dbgfmt;
+use crate::buffer::Buffer;
+use crate::Image;
+use azart_gfx_utils::misc::{MsaaCount, ShaderPath};
+use azart_gfx_utils::spirv::Spirv;
+use azart_utils::debug_string::{DebugString, dbgfmt};
+use bevy::asset::ron;
+use bevy::reflect::serde::TypedReflectDeserializer;
+use bevy::reflect::TypeRegistry;
+use serde::de::DeserializeSeed;
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
@@ -382,7 +386,7 @@ impl GpuContext {
 	}
 	
 	// @NOTE: Insanely unoptimized atm.
-	pub fn one_time_cmd<T>(&self, queue_family: u32, closure: impl FnOnce(vk::CommandBuffer) -> T) -> T {
+	pub fn immediate_cmd<T>(&self, queue_family: u32, closure: impl FnOnce(vk::CommandBuffer) -> T) -> T {
 		assert!(queue_family == self.queue_families.graphics || queue_family == self.queue_families.compute || queue_family == self.queue_families.transfer);
 		
 		let command_pool = {
@@ -492,7 +496,7 @@ impl GpuContext {
 		
 		let result = closure(memory);
 		
-		self.one_time_cmd(self.queue_families.transfer, |cmd| {
+		self.immediate_cmd(self.queue_families.transfer, |cmd| {
 			let regions = [
 				vk::BufferCopy::default()
 					.src_offset(0)
@@ -575,7 +579,7 @@ impl GpuContext {
 		
 		let result = closure(memory);
 		
-		self.one_time_cmd(self.queue_families.transfer, |cmd| {
+		self.immediate_cmd(self.queue_families.transfer, |cmd| {
 			unsafe {
 				self.cmd_transition_image_layout(cmd, staging_image, image.format, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, 1);
 				self.cmd_transition_image_layout(cmd, image.handle, image.format, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1);
@@ -616,23 +620,41 @@ impl GpuContext {
 		result
 	}
 
-	pub fn create_shader_module(&self, path: ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
+	pub fn create_shader_module(&self, path: &ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
 		#[cfg(debug_assertions)]
-		if !path.as_str().ends_with(".spv") {
+		if !matches!(path.extension(), Some(ext) if ext.to_str().unwrap().ends_with("spv")) {
 			return Err(ShaderModuleError::NotSpv);
 		}
 
-		let mut file = match std::fs::File::open(path.as_str()) {
+		let mut file = match std::fs::File::open(&**path) {
 			Ok(file) => file,
 			Err(e) => return match e.kind() {
-				std::io::ErrorKind::NotFound => Err(ShaderModuleError::InvalidPath(path.as_str().to_owned())),
-				std::io::ErrorKind::PermissionDenied => Err(ShaderModuleError::PermissionDenied(path.as_str().to_owned())),
-				_ => Err(ShaderModuleError::UnknownFileError(path.as_str().to_owned(), e)),
+				std::io::ErrorKind::NotFound => Err(ShaderModuleError::InvalidPath(path.to_str().unwrap().to_owned())),
+				std::io::ErrorKind::PermissionDenied => Err(ShaderModuleError::PermissionDenied(path.to_str().unwrap().to_owned())),
+				_ => Err(ShaderModuleError::UnknownFileError(path.to_str().unwrap().to_owned(), e)),
 			},
 		};
 
-		let mut code = vec![];
-		file.read_to_end(&mut code).unwrap();
+		let spirv = {
+			let mut file_contents = vec![];
+			file.read_to_end(&mut file_contents).expect("Failed to read shader file!");
+
+			let mut registry = TypeRegistry::new();
+			registry.register::<Spirv>();
+
+			let registration = registry.get(TypeId::of::<Spirv>()).unwrap();
+			let deserializer = TypedReflectDeserializer::new(registration, &registry);
+
+			let deserialized_value = deserializer.deserialize(
+				&mut ron::Deserializer::from_bytes(&file_contents).unwrap()
+			).unwrap();
+
+			<Spirv as FromReflect>::from_reflect(&*deserialized_value).unwrap()
+		};
+
+		let code = bytemuck::cast_slice::<_, u8>(&spirv.code)
+			.to_vec()
+			.into_boxed_slice();
 
 		let shader_module = {
 			let create_info = vk::ShaderModuleCreateInfo::default()
@@ -724,7 +746,7 @@ impl Deref for GpuContextHandle {
 
 pub struct ShaderModule<'a> {
 	pub handle: vk::ShaderModule,
-	pub code: Vec<u8>,
+	pub code: Box<[u8]>,
 	pub(crate) context: &'a GpuContext,
 }
 

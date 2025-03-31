@@ -1,5 +1,7 @@
 #version 450 core
 
+#extension GL_EXT_nonuniform_qualifier : enable
+
 layout (location = 0) out vec2 out_uv;
 
 void main() {

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 use ash::vk;
 use bevy::utils::HashSet;
-use crate::azart::gfx::GpuContext;
+use crate::GpuContext;
 
 pub struct CommandBuffer {
 	pub(crate) handle: vk::CommandBuffer,

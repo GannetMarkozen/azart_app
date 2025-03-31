@@ -5,9 +5,9 @@ use ash::vk;
 use bevy::math::UVec2;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
-use crate::azart::gfx::GpuContext;
-use crate::azart::gfx::misc::{MsaaCount, GpuResource};
-use crate::azart::utils::debug_string::DebugString;
+use crate::GpuContext;
+use azart_gfx_utils::{MsaaCount, GpuResource};
+use azart_utils::debug_string::DebugString;
 
 pub struct Image {
 	name: DebugString,

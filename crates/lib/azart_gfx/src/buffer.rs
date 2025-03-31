@@ -2,11 +2,11 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationScheme};
-use crate::azart::gfx::GpuContext;
-use crate::azart::utils::debug_string::DebugString;
+use crate::GpuContext;
+use azart_utils::debug_string::DebugString;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
-use crate::azart::gfx::misc::GpuResource;
+use azart_gfx_utils::GpuResource;
 
 pub struct Buffer {
 	pub(crate) name: DebugString,
@@ -29,7 +29,7 @@ impl Buffer {
 				.usage(create_info.usage)
 				.sharing_mode(vk::SharingMode::EXCLUSIVE)
 				.size(create_info.size as u64);
-
+				
 			unsafe { context.device.create_buffer(&create_info, None) }.unwrap()
 		};
 

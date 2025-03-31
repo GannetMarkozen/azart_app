@@ -1,11 +1,11 @@
 use std::slice;
-use crate::azart::utils::debug_string::DebugString;
+use azart_utils::debug_string::DebugString;
 use std::sync::Arc;
 use bevy::prelude::*;
 use ash::vk;
 use bevy::window::PresentMode;
 use winit::raw_window_handle::{DisplayHandle, WindowHandle};
-use crate::azart::{gfx::context::GpuContext};
+use crate::context::GpuContext;
 
 // Represents everything required to submit commands and render to a surface.
 #[derive(Component)]
