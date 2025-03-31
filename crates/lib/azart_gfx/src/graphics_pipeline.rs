@@ -19,7 +19,7 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-	// render_pass must outlive the construction time but can be safely destroyed afterward. Not thread-safe!
+	// render_pass must outlive the construction time but can be safely destroyed afterward.
 	pub unsafe fn new(
 		name: DebugString,
 		context: Arc<GpuContext>,
@@ -33,12 +33,12 @@ impl GraphicsPipeline {
 
 		let vertex_shader_module = context.create_shader_module(&create_info.vertex_shader).unwrap();
 		let fragment_shader_module = context.create_shader_module(&create_info.fragment_shader).unwrap();
-		let reflect_vertex_shader_module = spirv_reflect::create_shader_module(&vertex_shader_module.code).unwrap();
-		let reflect_fragment_shader_module = spirv_reflect::create_shader_module(&fragment_shader_module.code).unwrap();
+		let reflect_vertex_shader_module = spirv_reflect::create_shader_module(bytemuck::cast_slice(&vertex_shader_module.spirv.code)).unwrap();
+		let reflect_fragment_shader_module = spirv_reflect::create_shader_module(bytemuck::cast_slice(&fragment_shader_module.spirv.code)).unwrap();
 		
 		let (pipeline_layout, descriptor_set_layouts) = {
-			assert!(!vertex_shader_module.code.is_empty());
-			assert!(!fragment_shader_module.code.is_empty());
+			assert!(!vertex_shader_module.spirv.code.is_empty());
+			assert!(!fragment_shader_module.spirv.code.is_empty());
 
 			#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 			enum StorageType {

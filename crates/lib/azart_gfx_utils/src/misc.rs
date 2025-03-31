@@ -350,8 +350,8 @@ pub fn shader_path(path: impl AsRef<Path>) -> ShaderPath {
 	let path = path.as_ref();
 	let mut shader_path = Path::new("assets/spv/").join(path);
 	match path.extension() {
-		Some(ext) => _ = shader_path.set_extension(format!("{}.spv", ext.to_str().unwrap())),
-		None => _ = shader_path.set_extension("spv"),
+		Some(ext) => _ = shader_path.set_extension(format!("{}.ron", ext.to_str().unwrap())),
+		None => _ = shader_path.set_extension("ron"),
 	}
 
 	ShaderPath(shader_path)

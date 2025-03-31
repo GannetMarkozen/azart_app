@@ -207,13 +207,12 @@ fn main() {
 			specialization_constants: HashMap::new(),
 		};
 
-		//let path = SPV_DIR.to_owned() + path + ".spv";
 		let path = Path::new(SPV_DIR)
 			.join(file_name)
 			.with_extension(file_name
 				.rfind('.')
-				.map(|ext| format!("{}.spv", &file_name[(ext + 1)..]))
-				.unwrap_or_else(|| "spv".to_owned())
+				.map(|ext| format!("{}.ron", &file_name[(ext + 1)..]))
+				.unwrap_or_else(|| "ron".to_owned())
 			);
 
 		let mut file = match std::fs::File::create(&path) {
@@ -225,7 +224,7 @@ fn main() {
 		let mut registry = TypeRegistry::new();
 		registry.register::<Spirv>();
 
-		let serializer = TypedReflectSerializer::new(spirv.as_partial_reflect(), &registry);
+		let serializer = ReflectSerializer::new(spirv.as_partial_reflect(), &registry);
 		let serialized_value = ron::ser::to_string_pretty(&serializer, ron::ser::PrettyConfig::default()).unwrap();
 
 		file.write_all(serialized_value.as_bytes()).unwrap();

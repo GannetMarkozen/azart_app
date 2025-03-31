@@ -21,7 +21,7 @@ use azart_gfx_utils::misc::{MsaaCount, ShaderPath};
 use azart_gfx_utils::spirv::Spirv;
 use azart_utils::debug_string::{DebugString, dbgfmt};
 use bevy::asset::ron;
-use bevy::reflect::serde::TypedReflectDeserializer;
+use bevy::reflect::serde::{ReflectDeserializer, TypedReflectDeserializer};
 use bevy::reflect::TypeRegistry;
 use serde::de::DeserializeSeed;
 
@@ -622,7 +622,7 @@ impl GpuContext {
 
 	pub fn create_shader_module(&self, path: &ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
 		#[cfg(debug_assertions)]
-		if !matches!(path.extension(), Some(ext) if ext.to_str().unwrap().ends_with("spv")) {
+		if !matches!(path.extension(), Some(ext) if ext.to_str().unwrap().ends_with("ron")) {
 			return Err(ShaderModuleError::NotSpv);
 		}
 
@@ -635,6 +635,7 @@ impl GpuContext {
 			},
 		};
 
+		// Load Spirv struct from file.
 		let spirv = {
 			let mut file_contents = vec![];
 			file.read_to_end(&mut file_contents).expect("Failed to read shader file!");
@@ -643,7 +644,7 @@ impl GpuContext {
 			registry.register::<Spirv>();
 
 			let registration = registry.get(TypeId::of::<Spirv>()).unwrap();
-			let deserializer = TypedReflectDeserializer::new(registration, &registry);
+			let deserializer = ReflectDeserializer::new(&registry);
 
 			let deserialized_value = deserializer.deserialize(
 				&mut ron::Deserializer::from_bytes(&file_contents).unwrap()
@@ -652,20 +653,16 @@ impl GpuContext {
 			<Spirv as FromReflect>::from_reflect(&*deserialized_value).unwrap()
 		};
 
-		let code = bytemuck::cast_slice::<_, u8>(&spirv.code)
-			.to_vec()
-			.into_boxed_slice();
-
 		let shader_module = {
 			let create_info = vk::ShaderModuleCreateInfo::default()
-				.code(bytemuck::cast_slice(&code));
+				.code(&spirv.code);
 
 			unsafe { self.device.create_shader_module(&create_info, None) }.expect("Failed to create shader module!")
 		};
 
 		Ok(ShaderModule {
 			handle: shader_module,
-			code,
+			spirv,
 			context: &self,
 		})
 	}
@@ -745,12 +742,12 @@ impl Deref for GpuContextHandle {
 }
 
 pub struct ShaderModule<'a> {
-	pub handle: vk::ShaderModule,
-	pub code: Box<[u8]>,
+	pub(crate) handle: vk::ShaderModule,
+	pub spirv: Spirv,
 	pub(crate) context: &'a GpuContext,
 }
 
-impl<'a> Drop for ShaderModule<'a> {
+impl Drop for ShaderModule<'_> {
 	fn drop(&mut self) {
 		unsafe { self.context.device.destroy_shader_module(self.handle, None); }
 	}
