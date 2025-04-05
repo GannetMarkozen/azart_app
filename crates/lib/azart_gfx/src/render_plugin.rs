@@ -17,7 +17,7 @@ use bevy::reflect::{DynamicTypePath, TypeRegistry};
 use image::GenericImageView;
 use crate::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo, VertexAttribute, VertexInput};
 use crate::image::{Image, ImageCreateInfo};
-use azart_gfx_utils::{MsaaCount, ShaderPath, TriangleFillMode};
+use azart_gfx_utils::{Format, MsaaCount, ShaderPath, TriangleFillMode};
 use azart_utils::debug_string::*;
 use azart_gfx_utils::{asset_path, shader_path};
 use gpu_allocator::MemoryLocation;
@@ -200,7 +200,7 @@ impl BasePass {
 			true => Some({
 				let create_info = ImageCreateInfo {
 					resolution,
-					format: vk::Format::R8G8B8A8_UNORM,
+					format: Format::RgbaU8Norm,
 					usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
 					msaa,
 					..default()
@@ -214,9 +214,9 @@ impl BasePass {
 		let color_attachment = {
 			let create_info = ImageCreateInfo {
 				resolution,
-				format: vk::Format::R8G8B8A8_UNORM,
+				format: Format::RgbaU8Norm,
 				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
-				msaa: MsaaCount::Sample1,// Always 1. If Msaa is enabled this is the resolve image.
+				msaa: MsaaCount::None,// Always 1. If Msaa is enabled this is the resolve image.
 				..default()
 			};
 
@@ -226,7 +226,7 @@ impl BasePass {
 		let depth_attachment = {
 			let create_info = ImageCreateInfo {
 				resolution,
-				format: vk::Format::D32_SFLOAT,
+				format: Format::DF32,
 				usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
 				msaa,
 				..default()
@@ -239,19 +239,19 @@ impl BasePass {
 			let attachments = match &msaa_color_attachment {
 				Some(msaa_color_attachment) => vec![
 					vk::AttachmentDescription::default()
-						.format(msaa_color_attachment.format)
+						.format(msaa_color_attachment.format.into())
 						.initial_layout(vk::ImageLayout::UNDEFINED)
 						.final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
 						.load_op(vk::AttachmentLoadOp::CLEAR)
 						.samples(msaa.as_vk_sample_count()),
 					vk::AttachmentDescription::default()
-						.format(depth_attachment.format)
+						.format(depth_attachment.format.into())
 						.initial_layout(vk::ImageLayout::UNDEFINED)
 						.final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 						.load_op(vk::AttachmentLoadOp::CLEAR)
 						.samples(msaa.as_vk_sample_count()),
 					vk::AttachmentDescription::default()
-						.format(color_attachment.format)
+						.format(color_attachment.format.into())
 						.initial_layout(vk::ImageLayout::UNDEFINED)
 						.final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
 						.load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -259,13 +259,13 @@ impl BasePass {
 				],
 				None => vec![
 					vk::AttachmentDescription::default()
-						.format(color_attachment.format)
+						.format(color_attachment.format.into())
 						.initial_layout(vk::ImageLayout::UNDEFINED)
 						.final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
 						.load_op(vk::AttachmentLoadOp::CLEAR)// TODO: Conditionally use DONT_CARE on certain platforms perchance.
 						.samples(vk::SampleCountFlags::TYPE_1),
 					vk::AttachmentDescription::default()
-						.format(depth_attachment.format)
+						.format(depth_attachment.format.into())
 						.initial_layout(vk::ImageLayout::UNDEFINED)
 						.final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 						.load_op(vk::AttachmentLoadOp::CLEAR)
@@ -380,7 +380,7 @@ impl BasePass {
 				resolution,
 				format: self.color_attachment.format,
 				usage: self.color_attachment.usage,
-				msaa: MsaaCount::Sample1,
+				msaa: MsaaCount::None,
 				..default()
 			};
 
@@ -592,7 +592,8 @@ unsafe fn record(
 	context.device.cmd_bind_vertex_buffers(cmd, 0, &[model.vertex_buffer.handle], &[0]);
 	
 	context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.handle);
-	context.device.cmd_draw_indexed(cmd, CUBE_INDICES.len() as u32, 1, 0, 0, 0);
+
+	context.device.cmd_draw_indexed(cmd, CUBE_INDICES.len() as u32, 2, 0, 0, 0);
 
 	// End render pass.
 	{
@@ -684,23 +685,38 @@ fn create_render_pass_on_primary_window_spawned(
 		};
 
 		let texture = {
-			let path = asset_path("models/FlightHelmet/FlightHelmet_Materials_MetalPartsMat_OcclusionRoughMetal.png");
-			let png_data = std::fs::read(&*path)
-				.unwrap_or_else(|e| panic!("Failed to read data path {path:?}. Error: {e}"));
+			//let path = asset_path("models/FlightHelmet/FlightHelmet_Materials_MetalPartsMat_OcclusionRoughMetal.png");
 
-			let png = image::load_from_memory(&png_data).unwrap();
+			let path = asset_path("models/chom/chom.jpg");
+			let image_data = image::ImageReader::open(&*path)
+				.unwrap_or_else(|e| panic!("Failed to read data path {path:?}. Error: {e}"))
+				.decode()
+				.expect("Failed to decode image {path:?}!");
+
 			let create_info = ImageCreateInfo {
-				resolution: UVec2::new(png.width(), png.height()),
-				format: vk::Format::R8G8B8A8_UNORM,
+				resolution: UVec2::new(image_data.width(), image_data.height()),
+				format: Format::RgbaU8Norm,
 				usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-				msaa: MsaaCount::Sample1,
+				msaa: MsaaCount::None,
 				..default()
 			};
 
+			use image::DynamicImage::*;
+			let format = match &image_data {
+				ImageRgba8(_) => "rgba8",
+				ImageRgb8(_) => "rgb8",
+				ImageRgba16(_) => "rgba16",
+				ImageRgb16(_) => "rgb16",
+				_ => "unknown",
+			};
+
+			println!("Image format: {format:?}");
+
 			let image = Image::new("texture".into(), Arc::clone(&context), &create_info);
 
-			context.upload_image(&image, |data| {
-				png
+			println!("Allocation size: {}", image.allocation.size());
+			context.upload_image_buffer(&image, |data| {
+				image_data
 					.pixels()
 					.zip(data.chunks_exact_mut(4))
 					.for_each(|((_, _, image::Rgba(rgba)), data)| data.copy_from_slice(&rgba));
@@ -744,8 +760,8 @@ fn create_render_pass_on_primary_window_spawned(
 		let view_matrices_buffer = {
 			let view_matrices = unsafe {
 				let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0));
-				let view = Mat4::look_at_rh(Vec3::new(2.0, 2.0, 2.0), Vec3::ZERO, Vec3::Y);
-				let proj = Mat4::perspective_rh(45.0f32.to_radians(), window.resolution.physical_size().x as f32 / window.resolution.physical_size().y as f32, 0.1, 10.0);
+				let view = Mat4::look_at_rh(Vec3::new(5.0, 5.0, 5.0), Vec3::ZERO, Vec3::Y);
+				let proj = Mat4::perspective_rh(45.0f32.to_radians(), window.resolution.physical_size().x as f32 / window.resolution.physical_size().y as f32, 0.1, 100.0);
 
 				let mut proj = proj.to_cols_array_2d();
 				proj[1][1] *= -1.0;

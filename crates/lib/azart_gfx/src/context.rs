@@ -278,7 +278,7 @@ impl GpuContext {
 					} else if mask.contains(vk::SampleCountFlags::TYPE_2) {
 						MsaaCount::Sample2
 					} else {
-						MsaaCount::Sample1
+						MsaaCount::None
 					}
 				},
 			};
@@ -517,11 +517,94 @@ impl GpuContext {
 		
 		result
 	}
+
+	pub fn upload_image_buffer<T>(&self, image: &Image, closure: impl FnOnce(&mut [u8]) -> T) -> T {
+		assert!(image.usage.contains(vk::ImageUsageFlags::TRANSFER_DST), "Image {} must be created with TRANSFER_DST usage flag!", image.name());
+		assert_eq!(image.msaa, MsaaCount::None, "Can not upload Msaa target image with sample count {:?}", image.msaa);
+
+		let staging_buffer = {
+			let create_info = vk::BufferCreateInfo::default()
+				.usage(vk::BufferUsageFlags::TRANSFER_SRC)
+				.size(image.resolution.x as vk::DeviceSize * image.resolution.y as vk::DeviceSize * image.format.block_size() as vk::DeviceSize)
+				.sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+			unsafe { self.device.create_buffer(&create_info, None) }.unwrap()
+		};
+
+		let allocation = {
+			let (requirements, dedicated_allocation) = {
+				let info = vk::BufferMemoryRequirementsInfo2::default()
+					.buffer(staging_buffer);
+
+				let mut requirements = vk::MemoryRequirements2::default();
+				let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
+				requirements.push_next(&mut dedicated_requirements);
+
+				unsafe { self.device.get_buffer_memory_requirements2(&info, &mut requirements); }
+				(requirements.memory_requirements, dedicated_requirements.prefers_dedicated_allocation == vk::TRUE)
+			};
+
+			let allocation_scheme = match dedicated_allocation {
+				true => AllocationScheme::DedicatedBuffer(staging_buffer),
+				false => AllocationScheme::GpuAllocatorManaged,
+			};
+
+			let name = dbgfmt!("staging_buffer_{}", image.name().as_str());
+			let create_info = AllocationCreateDesc {
+				name: name.as_str(),
+				requirements,
+				location: MemoryLocation::CpuToGpu,
+				linear: true,
+				allocation_scheme,
+			};
+
+			self.alloc(&create_info)
+		};
+
+		unsafe { self.device.bind_buffer_memory(staging_buffer, allocation.memory(), allocation.offset()) }.expect("Failed to bind buffer memory!");
+
+		let memory = unsafe {
+			let memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+			slice::from_raw_parts_mut(memory, allocation.size() as usize)
+		};
+
+		let result = closure(memory);
+
+		self.immediate_cmd(self.queue_families.transfer, |cmd| {
+			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1); };
+
+			let regions = [
+				vk::BufferImageCopy::default()
+					.buffer_offset(0)
+					.buffer_row_length(0)
+					.buffer_image_height(0)
+					.image_subresource(vk::ImageSubresourceLayers::default()
+						.aspect_mask(vk::ImageAspectFlags::COLOR)
+						.mip_level(0)
+						.base_array_layer(0)
+						.layer_count(1)
+					)
+					.image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+					.image_extent(vk::Extent3D { width: image.resolution.x, height: image.resolution.y, depth: 1 }),
+			];
+
+			unsafe { self.device.cmd_copy_buffer_to_image(cmd, staging_buffer, image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions); }
+
+			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, 1); }
+		});
+
+		unsafe {
+			self.device.destroy_buffer(staging_buffer, None);
+			self.dealloc(allocation);
+		}
+
+		result
+	}
 	
 	pub fn upload_image<T>(&self, image: &Image, closure: impl FnOnce(&mut [u8]) -> T) -> T {
 		assert_ne!(image.resolution, UVec2::ZERO, "Image {} must have a non-zero resolution!", image.name());
 		assert!(image.usage.contains(vk::ImageUsageFlags::TRANSFER_DST), "Image {} must be created with the TRANSFER_DST usage flag!", image.name());
-		assert_eq!(image.msaa, MsaaCount::Sample1, "Can not upload Msaa target image with sample count {:?}!", image.msaa);
+		assert_eq!(image.msaa, MsaaCount::None, "Can not upload Msaa target image with sample count {:?}!", image.msaa);
 		
 		let staging_image = {
 			let create_info = vk::ImageCreateInfo::default()
@@ -533,7 +616,7 @@ impl GpuContext {
 				)
 				.mip_levels(1)
 				.array_layers(1)
-				.format(image.format)
+				.format(image.format.into())
 				.samples(vk::SampleCountFlags::TYPE_1)
 				.tiling(vk::ImageTiling::LINEAR)
 				.usage(vk::ImageUsageFlags::TRANSFER_SRC)
@@ -584,8 +667,8 @@ impl GpuContext {
 		
 		self.immediate_cmd(self.queue_families.transfer, |cmd| {
 			unsafe {
-				self.cmd_transition_image_layout(cmd, staging_image, image.format, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, 1);
-				self.cmd_transition_image_layout(cmd, image.handle, image.format, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1);
+				self.cmd_transition_image_layout(cmd, staging_image, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, 1);
+				self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1);
 			}
 			
 			let regions = [
@@ -612,7 +695,7 @@ impl GpuContext {
 			unsafe { self.device.cmd_copy_image(cmd, staging_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions); }
 			
 			// Transition image back to original layout.
-			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, 1); }
+			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, 1); }
 		});
 		
 		unsafe {

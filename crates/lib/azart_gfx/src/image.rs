@@ -6,7 +6,7 @@ use bevy::math::UVec2;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use crate::GpuContext;
-use azart_gfx_utils::{MsaaCount, GpuResource};
+use azart_gfx_utils::{MsaaCount, GpuResource, Format};
 use azart_utils::debug_string::DebugString;
 
 pub struct Image {
@@ -15,7 +15,7 @@ pub struct Image {
 	pub(crate) view: vk::ImageView,
 	pub(crate) allocation: ManuallyDrop<Allocation>,
 	pub(crate) resolution: UVec2,
-	pub(crate) format: vk::Format,
+	pub(crate) format: Format,
 	pub(crate) usage: vk::ImageUsageFlags,
 	pub(crate) layout: vk::ImageLayout,
 	pub(crate) msaa: MsaaCount,
@@ -40,7 +40,7 @@ impl Image {
 			assert!(create_info.resolution.x > 0 && create_info.resolution.y > 0, "Resolution was {:?}! Must be greater than 0!", create_info.resolution);
 
 			assert!(
-				!matches!(unsafe { context.instance.get_physical_device_image_format_properties(context.physical_device, create_info.format, vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, flags) },
+				!matches!(unsafe { context.instance.get_physical_device_image_format_properties(context.physical_device, create_info.format.into(), vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, flags) },
 				Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED)),
 				"Image \"{name}\" is not supported with: {:?}", create_info,
 			);
@@ -54,7 +54,7 @@ impl Image {
 				)
 				.mip_levels(mip_levels)
 				.array_layers(1)
-				.format(create_info.format)
+				.format(create_info.format.into())
 				.flags(flags)
 				.samples(create_info.msaa.as_vk_sample_count())
 				.tiling(create_info.tiling)
@@ -100,9 +100,9 @@ impl Image {
 			let create_info = vk::ImageViewCreateInfo::default()
 				.image(image)
 				.view_type(if create_info.array_layers == 1 { vk::ImageViewType::TYPE_2D } else { vk::ImageViewType::TYPE_2D_ARRAY })
-				.format(create_info.format)
+				.format(create_info.format.into())
 				.subresource_range(vk::ImageSubresourceRange::default()
-					.aspect_mask(match create_info.format {
+					.aspect_mask(match create_info.format.into() {
 						vk::Format::D32_SFLOAT | vk::Format::X8_D24_UNORM_PACK32 | vk::Format::D16_UNORM => vk::ImageAspectFlags::DEPTH,
 						vk::Format::D32_SFLOAT_S8_UINT | vk::Format::D24_UNORM_S8_UINT => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
 						_ => vk::ImageAspectFlags::COLOR,
@@ -156,7 +156,7 @@ impl Drop for Image {
 pub struct ImageCreateInfo {
 	pub resolution: UVec2,
 	pub mip_count: Option<NonZero<u32>>,// If None the mip count will be decided based on the image extent.
-	pub format: vk::Format,
+	pub format: Format,
 	pub usage: vk::ImageUsageFlags,
 	pub initial_layout: vk::ImageLayout,
 	pub tiling: vk::ImageTiling,
@@ -170,11 +170,11 @@ impl Default for ImageCreateInfo {
 		Self {
 			resolution: UVec2::new(1, 1),
 			mip_count: Some(NonZero::new(1).unwrap()),
-			format: vk::Format::R8G8B8A8_SRGB,
+			format: Format::RgbaU8Srgb,
 			usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 			initial_layout: vk::ImageLayout::UNDEFINED,
 			tiling: vk::ImageTiling::OPTIMAL,
-			msaa: MsaaCount::Sample1,
+			msaa: MsaaCount::None,
 			array_layers: 1,
 			memory: MemoryLocation::GpuOnly,
 		}

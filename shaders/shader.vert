@@ -36,6 +36,7 @@ void main() {
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
     out_uv = uvs[gl_VertexIndex];*/
 
-    gl_Position = view.proj * view.view * view.model * vec4(pos, 1.0);
+    const vec3 actual_pos = pos + vec3(0.0, gl_InstanceIndex * 2.5 - 2.5, 0.0);
+    gl_Position = view.proj * view.view * view.model * vec4(actual_pos, 1.0);
     out_uv = uv;
 }

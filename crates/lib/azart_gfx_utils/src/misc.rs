@@ -378,7 +378,7 @@ pub fn asset_path(path: impl AsRef<Path>) -> AssetPath {
 #[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Reflect, Resource)]
 pub enum MsaaCount {
 	#[default]
-	Sample1,// No MSAA.
+	None,// No MSAA.
 	Sample2,
 	Sample4,
 	Sample8,
@@ -388,13 +388,13 @@ impl MsaaCount {
 	// If Msaa > 1.
 	#[inline(always)]
 	pub const fn enabled(&self) -> bool {
-		!matches!(self, MsaaCount::Sample1)
+		!matches!(self, MsaaCount::None)
 	}
 
 	#[inline(always)]
 	pub const fn as_u32(&self) -> u32 {
 		match self {
-			MsaaCount::Sample1 => 1,
+			MsaaCount::None => 1,
 			MsaaCount::Sample2 => 2,
 			MsaaCount::Sample4 => 4,
 			MsaaCount::Sample8 => 8,
@@ -404,7 +404,7 @@ impl MsaaCount {
 	#[inline(always)]
 	pub const fn as_vk_sample_count(&self) -> vk::SampleCountFlags {
 		match self {
-			MsaaCount::Sample1 => vk::SampleCountFlags::TYPE_1,
+			MsaaCount::None => vk::SampleCountFlags::TYPE_1,
 			MsaaCount::Sample2 => vk::SampleCountFlags::TYPE_2,
 			MsaaCount::Sample4 => vk::SampleCountFlags::TYPE_4,
 			MsaaCount::Sample8 => vk::SampleCountFlags::TYPE_8,
@@ -432,7 +432,7 @@ impl From<vk::SampleCountFlags> for MsaaCount {
 			vk::SampleCountFlags::TYPE_2 => MsaaCount::Sample2,
 			vk::SampleCountFlags::TYPE_4 => MsaaCount::Sample4,
 			vk::SampleCountFlags::TYPE_8 => MsaaCount::Sample8,
-			_ => MsaaCount::Sample1,
+			_ => MsaaCount::None,
 		}
 	}
 }
