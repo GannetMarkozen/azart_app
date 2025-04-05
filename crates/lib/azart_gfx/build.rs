@@ -4,13 +4,14 @@ use std::path::Path;
 use azart_gfx_utils::Format;
 use azart_gfx_utils::spirv::*;
 use bevy::prelude::PartialReflect;
-use spirv_reflect::types::{ReflectBuiltIn, ReflectDecorationFlags, ReflectDescriptorType, ReflectFormat, ReflectNumericTraitsScalar, ReflectStorageClass, ReflectTypeDescription, ReflectTypeFlags};
+use spirv_reflect::types::{ReflectBuiltIn, ReflectDecorationFlags, ReflectDescriptorType, ReflectFormat, ReflectNumericTraitsScalar, ReflectShaderStageFlags, ReflectStorageClass, ReflectTypeDescription, ReflectTypeFlags};
 use spirv_headers::{BuiltIn, Op};
 use bevy::utils::HashMap;
 use bevy::reflect::{ReflectSerialize, TypeRegistry};
 use bevy::reflect::serde::{ReflectSerializer, TypedReflectSerializer};
 use bevy::tasks::futures_lite::io::BufWriter;
 use serde::Serialize;
+use shaderc::ResolvedInclude;
 use walkdir::WalkDir;
 
 const SHADER_DIR: &str = "..\\..\\..\\shaders";
@@ -53,6 +54,7 @@ fn main() {
 			"task" => ShaderStage::Task,
 			"raygen" => ShaderStage::RayGen,
 			"anyhit" => ShaderStage::AnyHit,
+			"glsl" => continue,// glsl files are treated as headers, so don't compile them individually.
 			_ => panic!("Unsupported shader extension \"{ext}\" for file {entry:?}!"),
 		};
 
@@ -77,10 +79,22 @@ fn main() {
 		};
 
 		let mut compile_options = shaderc::CompileOptions::new().unwrap();
-		compile_options.set_optimization_level(if release_build { shaderc::OptimizationLevel::Performance } else { shaderc::OptimizationLevel::Zero });
+		compile_options.set_source_language(shaderc::SourceLanguage::GLSL);
+		compile_options.set_optimization_level(shaderc::OptimizationLevel::Performance);
+		//compile_options.set_optimization_level(if release_build { shaderc::OptimizationLevel::Performance } else { shaderc::OptimizationLevel::Zero });
 		compile_options.set_auto_bind_uniforms(true);
 		compile_options.set_auto_map_locations(true);
 		compile_options.set_forced_version_profile(450, shaderc::GlslProfile::Core);
+		compile_options.set_generate_debug_info();
+		compile_options.set_include_callback(|include, include_type, _, _| {
+			let path = path.parent().unwrap_or(path).join(include);
+			let content = std::fs::read_to_string(&path).map_err(|e| format!("Failed to read include file {include} from path {path:?}! Error: {e}"))?;
+
+			Ok(ResolvedInclude {
+				resolved_name: path.to_str().unwrap().to_owned(),
+				content,
+			})
+		});
 
 		let result = compiler.compile_into_spirv(
 			&std::fs::read_to_string(path).unwrap(),
@@ -99,38 +113,6 @@ fn main() {
 		};
 
 		let module = spirv_reflect::create_shader_module(result.as_binary_u8()).unwrap();
-		/*let mut bindings = HashMap::new();
-		let mut specialization_constants = HashMap::new();
-
-		for binding in module.enumerate_descriptor_bindings(Some(ENTRY_POINT)).unwrap().into_iter() {
-			let type_desc = binding.type_description.unwrap();
-			if matches!(*type_desc.op, Op::SpecConstant | Op::SpecConstantComposite | Op::SpecConstantTrue | Op::SpecConstantFalse) {// Specialization constant.
-				specialization_constants.insert(binding.name, SpecializationConstant {
-					binding: binding.binding,
-					specialization_constant_type: match binding.type_description.unwrap().type_flags {
-						x if x.contains(ReflectTypeFlags::BOOL) => PrimType::Bool,
-						x if x.contains(ReflectTypeFlags::INT) => match type_desc.traits.numeric.scalar {
-							ReflectNumericTraitsScalar { width: 32, signedness: 0 } => PrimType::U32,
-						}
-					},
-				});
-			} else {// Binding.
-
-			}
-		}*/
-
-		for binding in module.enumerate_descriptor_bindings(Some(ENTRY_POINT)).unwrap().into_iter() {
-			if !matches!(binding.descriptor_type, ReflectDescriptorType::UniformBuffer | ReflectDescriptorType::UniformBufferDynamic | ReflectDescriptorType::StorageBuffer) {
-				continue;
-			}
-
-			let mut out = "
-				#[repr(c)]\n
-				#[derive(Clone, Debug, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable)]\n
-				{\n
-				\t"
-				.to_owned();
-		}
 
 		let bindings = module
 			.enumerate_descriptor_bindings(Some(ENTRY_POINT))
@@ -169,34 +151,39 @@ fn main() {
 			})
 			.collect::<HashMap<_, _>>();
 
-		let vertex_attributes = module
-			.enumerate_input_variables(Some(ENTRY_POINT))
-			.unwrap()
-			.into_iter()
-			.filter(|input| !input.decoration_flags.contains(ReflectDecorationFlags::BUILT_IN))
-			.map(|input| {
-				let attribute = VertexAttribute {
-					location: input.location,
-					format: match input.format {
-						ReflectFormat::Undefined => Format::Undefined,
-						ReflectFormat::R32_UINT => Format::RU32,
-						ReflectFormat::R32_SINT => Format::RI32,
-						ReflectFormat::R32_SFLOAT => Format::RF32,
-						ReflectFormat::R32G32_UINT => Format::RgU32,
-						ReflectFormat::R32G32_SINT => Format::RgI32,
-						ReflectFormat::R32G32_SFLOAT => Format::RgF32,
-						ReflectFormat::R32G32B32_UINT => Format::RgbU32,
-						ReflectFormat::R32G32B32_SINT => Format::RgbI32,
-						ReflectFormat::R32G32B32_SFLOAT => Format::RgbF32,
-						ReflectFormat::R32G32B32A32_UINT => Format::RgbaU32,
-						ReflectFormat::R32G32B32A32_SINT => Format::RgbaI32,
-						ReflectFormat::R32G32B32A32_SFLOAT => Format::RgbaF32,
-					},
-				};
+		// Only the vertex shader can have vertex attributes.
+		let vertex_attributes = if module.get_shader_stage().contains(ReflectShaderStageFlags::VERTEX) {
+			module
+				.enumerate_input_variables(Some(ENTRY_POINT))
+				.unwrap()
+				.into_iter()
+				.filter(|input| !input.decoration_flags.contains(ReflectDecorationFlags::BUILT_IN))
+				.map(|input| {
+					let attribute = VertexAttribute {
+						location: input.location,
+						format: match input.format {
+							ReflectFormat::Undefined => Format::Undefined,
+							ReflectFormat::R32_UINT => Format::RU32,
+							ReflectFormat::R32_SINT => Format::RI32,
+							ReflectFormat::R32_SFLOAT => Format::RF32,
+							ReflectFormat::R32G32_UINT => Format::RgU32,
+							ReflectFormat::R32G32_SINT => Format::RgI32,
+							ReflectFormat::R32G32_SFLOAT => Format::RgF32,
+							ReflectFormat::R32G32B32_UINT => Format::RgbU32,
+							ReflectFormat::R32G32B32_SINT => Format::RgbI32,
+							ReflectFormat::R32G32B32_SFLOAT => Format::RgbF32,
+							ReflectFormat::R32G32B32A32_UINT => Format::RgbaU32,
+							ReflectFormat::R32G32B32A32_SINT => Format::RgbaI32,
+							ReflectFormat::R32G32B32A32_SFLOAT => Format::RgbaF32,
+						},
+					};
 
-				(input.name, attribute)
-			})
-			.collect::<HashMap<_, _>>();
+					(input.name, attribute)
+				})
+				.collect::<HashMap<_, _>>()
+		} else {
+			HashMap::new()
+		};
 
 		let spirv = Spirv {
 			code: result.as_binary().to_vec(),

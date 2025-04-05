@@ -1,11 +1,27 @@
-#version 450 core
 
 #extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_debug_printf : enable
 
-layout (location = 0) out vec2 out_uv;
+//#include "global_bindings.glsl"
+
+#define GLOBAL_SET_INDEX 4
+
+layout (binding = 0) uniform ViewMatrices {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+} view;
+
+//~
+// Vertex attributes.
+in vec3 pos;
+in vec2 uv;
+//~
+
+out vec2 out_uv;
 
 void main() {
-    const vec2 positions[3] = vec2[](
+    /*const vec2 positions[3] = vec2[](
         vec2(0.0, -0.5),  // top
         vec2(0.5, 0.5),  // right
         vec2(-0.5, 0.5)   // left
@@ -18,5 +34,8 @@ void main() {
     );
 
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    out_uv = uvs[gl_VertexIndex];
+    out_uv = uvs[gl_VertexIndex];*/
+
+    gl_Position = view.proj * view.view * view.model * vec4(pos, 1.0);
+    out_uv = uv;
 }

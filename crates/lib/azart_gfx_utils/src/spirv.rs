@@ -1,6 +1,7 @@
 use bevy::utils::HashMap;
 use bevy::reflect::Reflect;
 use crate::Format;
+use ash::vk;
 
 #[derive(Default, Clone, Debug, Reflect)]
 pub struct Spirv {
@@ -27,7 +28,25 @@ pub enum ShaderStage {
 	AnyHit,
 }
 
-#[derive(Default, Clone, Debug, Reflect)]
+impl Into<vk::ShaderStageFlags> for ShaderStage {
+	fn into(self) -> vk::ShaderStageFlags {
+		use ShaderStage::*;
+		match self {
+			Vertex => vk::ShaderStageFlags::VERTEX,
+			Fragment => vk::ShaderStageFlags::FRAGMENT,
+			Compute => vk::ShaderStageFlags::COMPUTE,
+			Geometry => vk::ShaderStageFlags::GEOMETRY,
+			TessControl => vk::ShaderStageFlags::TESSELLATION_CONTROL,
+			TessEval => vk::ShaderStageFlags::TESSELLATION_EVALUATION,
+			Mesh => vk::ShaderStageFlags::MESH_EXT,
+			Task => vk::ShaderStageFlags::TASK_EXT,
+			RayGen => vk::ShaderStageFlags::RAYGEN_KHR,
+			AnyHit => vk::ShaderStageFlags::ANY_HIT_KHR,
+		}
+	}
+}
+
+#[derive(Default, Clone, Eq, PartialEq, Hash, Debug, Reflect)]
 pub struct DescriptorBinding {
 	pub set: u32,
 	pub binding: u32,
@@ -51,6 +70,45 @@ pub enum DescriptorType {
 	AccelerationStructureNV,
 }
 
+impl From<vk::DescriptorType> for DescriptorType {
+	fn from(value: vk::DescriptorType) -> Self {
+		use DescriptorType::*;
+		match value {
+			vk::DescriptorType::SAMPLER => Sampler,
+			vk::DescriptorType::COMBINED_IMAGE_SAMPLER => CombinedImageSampler,
+			vk::DescriptorType::SAMPLED_IMAGE => SampledImage,
+			vk::DescriptorType::STORAGE_IMAGE => StorageImage,
+			vk::DescriptorType::UNIFORM_TEXEL_BUFFER => UniformTexelBuffer,
+			vk::DescriptorType::STORAGE_TEXEL_BUFFER => StorageTexelBuffer,
+			vk::DescriptorType::UNIFORM_BUFFER => UniformBuffer,
+			vk::DescriptorType::STORAGE_BUFFER => StorageBuffer,
+			vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC => UniformBufferDynamic,
+			vk::DescriptorType::INPUT_ATTACHMENT => InputAttachment,
+			vk::DescriptorType::ACCELERATION_STRUCTURE_NV => AccelerationStructureNV,
+			_ => panic!("Unsupported descriptor type {value:?}"),
+		}
+	}
+}
+
+impl Into<vk::DescriptorType> for DescriptorType {
+	fn into(self) -> vk::DescriptorType {
+		use DescriptorType::*;
+		match self {
+			Sampler => vk::DescriptorType::SAMPLER,
+			CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+			SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
+			StorageImage => vk::DescriptorType::STORAGE_IMAGE,
+			UniformTexelBuffer => vk::DescriptorType::UNIFORM_TEXEL_BUFFER,
+			StorageTexelBuffer => vk::DescriptorType::STORAGE_TEXEL_BUFFER,
+			UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
+			StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+			UniformBufferDynamic => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+			InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
+			AccelerationStructureNV => vk::DescriptorType::ACCELERATION_STRUCTURE_NV,
+		}
+	}
+}
+
 #[derive(Default, Clone, Copy, Eq, PartialEq, Hash, Debug, Reflect)]
 pub enum ContainerType {
 	#[default]
@@ -61,7 +119,7 @@ pub enum ContainerType {
 	RuntimeArray,
 }
 
-#[derive(Clone, Debug, Reflect)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Reflect)]
 pub struct VertexAttribute {
 	pub location: u32,
 	pub format: Format,

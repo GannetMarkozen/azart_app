@@ -12,6 +12,7 @@ pub struct Buffer {
 	pub(crate) name: DebugString,
 	pub(crate) handle: vk::Buffer,
 	pub(crate) allocation: ManuallyDrop<Allocation>,
+	size: usize,
 	pub(crate) context: Arc<GpuContext>,
 }
 
@@ -73,13 +74,14 @@ impl Buffer {
 			name,
 			handle: buffer,
 			allocation: ManuallyDrop::new(allocation),
+			size: create_info.size,
 			context,
 		}
 	}
 
 	#[inline(always)]
 	pub fn size(&self) -> usize {
-		self.allocation.size() as usize
+		self.size
 	}
 	
 	#[inline(always)]

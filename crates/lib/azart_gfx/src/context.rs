@@ -38,7 +38,9 @@ pub struct GpuContext {
 
 impl GpuContext {
 	#[cfg(debug_assertions)]
-	const INSTANCE_LAYER_NAMES: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
+	const INSTANCE_LAYER_NAMES: [&'static CStr; 1] = [
+		c"VK_LAYER_KHRONOS_validation",
+	];
 	#[cfg(not(debug_assertions))]
 	const INSTANCE_LAYER_NAMES: [&'static CStr; 0] = [];
 
@@ -310,6 +312,7 @@ impl GpuContext {
 			.unwrap_or_else(|e| panic!("Failed to free memory. Error: {:?}", e));
 	}
 
+	// @TODO: Hard-coded and inflexible + over-generalized. Making a RenderGraph should alleviate this problem.
 	pub unsafe fn cmd_transition_image_layout(
 		&self,
 		cmd: vk::CommandBuffer,
@@ -446,7 +449,7 @@ impl GpuContext {
 		result
 	}
 	
-	pub fn upload_buffer<T: bytemuck::NoUninit + bytemuck::AnyBitPattern, R>(&self, buffer: &Buffer, closure: impl FnOnce(&mut [T]) -> R) -> R {
+	pub fn upload_buffer<T>(&self, buffer: &Buffer, closure: impl FnOnce(&mut [u8]) -> T) -> T {
 		let staging_buffer = {
 			let create_info = vk::BufferCreateInfo::default()
 				.usage(vk::BufferUsageFlags::TRANSFER_SRC)
@@ -489,10 +492,10 @@ impl GpuContext {
 
 		unsafe { self.device.bind_buffer_memory(staging_buffer, allocation.memory(), allocation.offset()) }.expect("Failed to bind buffer memory!");
 		
-		let memory = bytemuck::cast_slice_mut::<_, T>(unsafe {
-			let memory = mem::transmute::<_, *mut u8>(allocation.memory()).add(allocation.offset() as usize);
+		let memory = unsafe {
+			let memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
 			slice::from_raw_parts_mut(memory, buffer.size())
-		});
+		};
 		
 		let result = closure(memory);
 		
@@ -643,7 +646,6 @@ impl GpuContext {
 			let mut registry = TypeRegistry::new();
 			registry.register::<Spirv>();
 
-			let registration = registry.get(TypeId::of::<Spirv>()).unwrap();
 			let deserializer = ReflectDeserializer::new(&registry);
 
 			let deserialized_value = deserializer.deserialize(
