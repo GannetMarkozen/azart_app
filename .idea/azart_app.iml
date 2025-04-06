@@ -5,9 +5,12 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/lib/azart/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/lib/azart_utils/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/lib/vk-sync-rs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/lib/vk-sync-rs/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/crates/lib/azart/target" />
       <excludeFolder url="file://$MODULE_DIR$/crates/lib/azart_utils/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/lib/vk-sync-rs/target" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

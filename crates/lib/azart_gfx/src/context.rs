@@ -24,6 +24,7 @@ use bevy::asset::ron;
 use bevy::reflect::serde::{ReflectDeserializer, TypedReflectDeserializer};
 use bevy::reflect::TypeRegistry;
 use serde::de::DeserializeSeed;
+use vk_sync::*;
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
@@ -49,14 +50,17 @@ impl GpuContext {
 	#[cfg(not(debug_assertions))]
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 0] = [];
 
-	const DEVICE_EXTENSION_NAMES: [&'static CStr; 8] = [
+	// List of core extensions.
+	const DEVICE_EXTENSION_NAMES: [&'static CStr; 10] = [
 		ash::ext::descriptor_indexing::NAME,
 		ash::khr::buffer_device_address::NAME,
+		ash::khr::push_descriptor::NAME,
 		ash::ext::extended_dynamic_state::NAME,
 		ash::khr::swapchain::NAME,
 		ash::khr::multiview::NAME,
 		ash::khr::draw_indirect_count::NAME,
 		ash::khr::create_renderpass2::NAME,
+		ash::khr::timeline_semaphore::NAME,
 		ash::khr::fragment_shading_rate::NAME,
 	];
 
@@ -312,6 +316,61 @@ impl GpuContext {
 			.unwrap_or_else(|e| panic!("Failed to free memory. Error: {:?}", e));
 	}
 
+	pub fn pipeline_barrier(
+		&self,
+		cmd: vk::CommandBuffer,
+		global_barrier: Option<GlobalBarrier>,
+		buffer_barriers: &[BufferBarrier],
+		image_barriers: &[ImageBarrier],
+	) {
+		let mut src_stage_mask = vk::PipelineStageFlags::TOP_OF_PIPE;
+		let mut dst_stage_mask = vk::PipelineStageFlags::BOTTOM_OF_PIPE;
+
+		let memory_barrier = global_barrier.map(|global_barrier| {
+			let (src_mask, dst_mask, barrier) = get_memory_barrier(&global_barrier);
+			src_stage_mask |= src_mask;
+			dst_stage_mask |= dst_mask;
+			barrier
+		});
+
+		let memory_barriers = match &memory_barrier {
+			Some(memory_barrier) => slice::from_ref(memory_barrier),
+			None => &[],
+		};
+
+		let buffer_barriers = buffer_barriers
+			.iter()
+			.map(|buffer_barrier| {
+				let (src_mask, dst_mask, barrier) = get_buffer_memory_barrier(buffer_barrier);
+				src_stage_mask |= src_mask;
+				dst_stage_mask |= dst_mask;
+				barrier
+			})
+			.collect::<Vec<_>>();
+
+		let image_barriers = image_barriers
+			.iter()
+			.map(|image_barrier| {
+				let (src_mask, dst_mask, barrier) = get_image_memory_barrier(image_barrier);
+				src_stage_mask |= src_mask;
+				dst_stage_mask |= dst_mask;
+				barrier
+			})
+			.collect::<Vec<_>>();
+
+		unsafe {
+			self.device.cmd_pipeline_barrier(
+				cmd,
+				src_stage_mask,
+				dst_stage_mask,
+				vk::DependencyFlags::empty(),
+				&memory_barriers,
+				&buffer_barriers,
+				&image_barriers,
+			);
+		}
+	}
+
 	// @TODO: Hard-coded and inflexible + over-generalized. Making a RenderGraph should alleviate this problem.
 	pub unsafe fn cmd_transition_image_layout(
 		&self,
@@ -320,7 +379,8 @@ impl GpuContext {
 		format: vk::Format,
 		old_layout: vk::ImageLayout,
 		new_layout: vk::ImageLayout,
-		mip_count: u32,
+		mips: Range<u32>,
+		layers: Range<u32>,
 	) {
 		use vk::Format;
 		use vk::ImageLayout;
@@ -328,13 +388,13 @@ impl GpuContext {
 		use vk::PipelineStageFlags;
 		use vk::ImageAspectFlags;
 
-		assert_ne!(mip_count, 0, "Mip count must be greater than 0!");
+		assert_ne!(mips.len(), 0, "Mip count must be greater than 0!");
 		
 		let (
 			src_access_mask,
 			dst_access_mask,
 			src_stage,
-			dst_stage
+			dst_stage,
 		) = match (old_layout, new_layout) {
 			(ImageLayout::UNDEFINED, ImageLayout::TRANSFER_SRC_OPTIMAL | ImageLayout::TRANSFER_DST_OPTIMAL) => (
 				AccessFlags::empty(),
@@ -379,10 +439,10 @@ impl GpuContext {
 			.image(image)
 			.subresource_range(vk::ImageSubresourceRange::default()
 				.aspect_mask(aspect_mask)
-				.base_mip_level(0)
-				.level_count(mip_count)
-				.base_array_layer(0)
-				.layer_count(1)
+				.base_mip_level(mips.start)
+				.level_count(mips.len() as u32)
+				.base_array_layer(layers.start)
+				.layer_count(layers.len() as u32)
 			);
 
 		unsafe { self.device.cmd_pipeline_barrier(cmd, src_stage, dst_stage, vk::DependencyFlags::empty(), &[], &[], &[barrier]); }
@@ -518,14 +578,24 @@ impl GpuContext {
 		result
 	}
 
-	pub fn upload_image_buffer<T>(&self, image: &Image, closure: impl FnOnce(&mut [u8]) -> T) -> T {
+	// If the mips are not explicitly stated, all elements will be uploaded to.
+	// @TODO: Layers.
+	// @TODO: Optimize.
+	pub fn upload_image<T>(&self, image: &Image, mips: Option<Range<u32>>, closure: impl FnOnce(&mut [&mut [u8]]) -> T) -> T {
 		assert!(image.usage.contains(vk::ImageUsageFlags::TRANSFER_DST), "Image {} must be created with TRANSFER_DST usage flag!", image.name());
 		assert_eq!(image.msaa, MsaaCount::None, "Can not upload Msaa target image with sample count {:?}", image.msaa);
 
+		let mips = mips.unwrap_or(0..image.mips());
+
 		let staging_buffer = {
+			let pixel_count = mips
+				.clone()
+				.map(|mip| (image.resolution.x >> mip).max(1) * (image.resolution.y >> mip).max(1))
+				.sum::<u32>();
+
 			let create_info = vk::BufferCreateInfo::default()
 				.usage(vk::BufferUsageFlags::TRANSFER_SRC)
-				.size(image.resolution.x as vk::DeviceSize * image.resolution.y as vk::DeviceSize * image.format.block_size() as vk::DeviceSize)
+				.size(pixel_count as vk::DeviceSize * image.format.block_size() as vk::DeviceSize)
 				.sharing_mode(vk::SharingMode::EXCLUSIVE);
 
 			unsafe { self.device.create_buffer(&create_info, None) }.unwrap()
@@ -563,34 +633,54 @@ impl GpuContext {
 
 		unsafe { self.device.bind_buffer_memory(staging_buffer, allocation.memory(), allocation.offset()) }.expect("Failed to bind buffer memory!");
 
-		let memory = unsafe {
-			let memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
-			slice::from_raw_parts_mut(memory, allocation.size() as usize)
+		let mut mips_memory = {
+			let mut memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+			mips
+				.clone()
+				.map(|mip| {
+					let size = (image.resolution.x >> mip).max(1) * (image.resolution.y >> mip).max(1) * image.format.block_size() as u32;
+					let slice = unsafe { slice::from_raw_parts_mut(memory, size as usize) };
+					memory = unsafe { memory.add(size as usize) };
+					slice
+				})
+				.collect::<Vec<_>>()
 		};
 
-		let result = closure(memory);
+		let result = closure(&mut mips_memory);
 
 		self.immediate_cmd(self.queue_families.transfer, |cmd| {
-			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1); };
+			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, mips.clone(), 0..1); };
 
-			let regions = [
-				vk::BufferImageCopy::default()
-					.buffer_offset(0)
-					.buffer_row_length(0)
-					.buffer_image_height(0)
-					.image_subresource(vk::ImageSubresourceLayers::default()
-						.aspect_mask(vk::ImageAspectFlags::COLOR)
-						.mip_level(0)
-						.base_array_layer(0)
-						.layer_count(1)
-					)
-					.image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-					.image_extent(vk::Extent3D { width: image.resolution.x, height: image.resolution.y, depth: 1 }),
-			];
+			let mut offset = 0;
+			let regions = mips
+				.clone()
+				.map(|mip| {
+					let width = (image.resolution.x >> mip).max(1);
+					let height = (image.resolution.y >> mip).max(1);
+					let size = width * height * image.format.block_size() as u32;
+
+					let region = vk::BufferImageCopy::default()
+						.buffer_offset(offset)
+						.buffer_row_length(0)
+						.buffer_image_height(0)
+						.image_subresource(vk::ImageSubresourceLayers::default()
+							.aspect_mask(vk::ImageAspectFlags::COLOR)
+							.mip_level(mip)
+							.base_array_layer(0)
+							.layer_count(1)
+						)
+						.image_offset(vk::Offset3D { x: 0, y: 0, z: 0})
+						.image_extent(vk::Extent3D { width, height, depth: 1 });
+
+					offset += size as vk::DeviceSize;
+
+					region
+				})
+				.collect::<Vec<_>>();
 
 			unsafe { self.device.cmd_copy_buffer_to_image(cmd, staging_buffer, image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions); }
 
-			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, 1); }
+			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, mips, 0..1); }
 		});
 
 		unsafe {
@@ -601,111 +691,6 @@ impl GpuContext {
 		result
 	}
 	
-	pub fn upload_image<T>(&self, image: &Image, closure: impl FnOnce(&mut [u8]) -> T) -> T {
-		assert_ne!(image.resolution, UVec2::ZERO, "Image {} must have a non-zero resolution!", image.name());
-		assert!(image.usage.contains(vk::ImageUsageFlags::TRANSFER_DST), "Image {} must be created with the TRANSFER_DST usage flag!", image.name());
-		assert_eq!(image.msaa, MsaaCount::None, "Can not upload Msaa target image with sample count {:?}!", image.msaa);
-		
-		let staging_image = {
-			let create_info = vk::ImageCreateInfo::default()
-				.image_type(vk::ImageType::TYPE_2D)
-				.extent(vk::Extent3D::default()
-					.width(image.resolution.x)
-					.height(image.resolution.y)
-					.depth(1)
-				)
-				.mip_levels(1)
-				.array_layers(1)
-				.format(image.format.into())
-				.samples(vk::SampleCountFlags::TYPE_1)
-				.tiling(vk::ImageTiling::LINEAR)
-				.usage(vk::ImageUsageFlags::TRANSFER_SRC)
-				.sharing_mode(vk::SharingMode::EXCLUSIVE)
-				.initial_layout(vk::ImageLayout::UNDEFINED);
-			
-			unsafe { self.device.create_image(&create_info, None) }.unwrap()
-		};
-		
-		let allocation = {
-			let (requirements, dedicated_allocation) = {
-				let info = vk::ImageMemoryRequirementsInfo2::default()
-					.image(staging_image);
-
-				let mut requirements = vk::MemoryRequirements2::default();
-				let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
-				requirements.push_next(&mut dedicated_requirements);
-
-				unsafe { self.device.get_image_memory_requirements2(&info, &mut requirements); }
-				(requirements.memory_requirements, dedicated_requirements.prefers_dedicated_allocation == vk::TRUE)
-			};
-
-			let allocation_scheme = match dedicated_allocation {
-				true => AllocationScheme::DedicatedImage(staging_image),
-				false => AllocationScheme::GpuAllocatorManaged,
-			};
-			
-			let name = dbgfmt!("staging_image_{}", image.name().as_str());
-			let create_info = AllocationCreateDesc {
-				name: name.as_str(),
-				requirements,
-				location: MemoryLocation::CpuToGpu,
-				linear: true,
-				allocation_scheme,
-			};
-			
-			self.alloc(&create_info)
-		};
-
-		unsafe { self.device.bind_image_memory(staging_image, allocation.memory(), allocation.offset()) }.expect("Failed to bind image memory!");
-
-		let memory = unsafe {
-			let memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
-			slice::from_raw_parts_mut(memory, allocation.size() as usize)
-		};
-		
-		let result = closure(memory);
-		
-		self.immediate_cmd(self.queue_families.transfer, |cmd| {
-			unsafe {
-				self.cmd_transition_image_layout(cmd, staging_image, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, 1);
-				self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1);
-			}
-			
-			let regions = [
-				vk::ImageCopy::default()
-					.extent(vk::Extent3D::default()
-						.width(image.resolution.x)
-						.height(image.resolution.y)
-						.depth(1)
-					)
-					.src_subresource(vk::ImageSubresourceLayers::default()
-						.aspect_mask(vk::ImageAspectFlags::COLOR)
-						.mip_level(0)
-						.base_array_layer(0)
-						.layer_count(1)
-					)
-					.dst_subresource(vk::ImageSubresourceLayers::default()
-						.aspect_mask(vk::ImageAspectFlags::COLOR)
-						.mip_level(0)
-						.base_array_layer(0)
-						.layer_count(1)
-					)
-			];
-			
-			unsafe { self.device.cmd_copy_image(cmd, staging_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions); }
-			
-			// Transition image back to original layout.
-			unsafe { self.cmd_transition_image_layout(cmd, image.handle, image.format.into(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, 1); }
-		});
-		
-		unsafe {
-			self.device.destroy_image(staging_image, None);
-			self.dealloc(allocation);
-		}
-		
-		result
-	}
-
 	pub fn create_shader_module(&self, path: &ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
 		#[cfg(debug_assertions)]
 		if !matches!(path.extension(), Some(ext) if ext.to_str().unwrap().ends_with("ron")) {

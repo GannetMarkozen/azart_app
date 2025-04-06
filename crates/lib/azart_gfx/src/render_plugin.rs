@@ -10,7 +10,7 @@ use bevy::window::{PresentMode, PrimaryWindow, RequestRedraw, WindowCreated, Win
 use bevy::winit::{WakeUp, WinitWindows};
 use winit::event_loop::EventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use super::{GpuContext, GpuContextHandle, SwapchainCreateInfo};
+use super::{GpuContext, GpuContextHandle, MipCount, SwapchainCreateInfo};
 use super::Swapchain;
 use ash::vk;
 use bevy::reflect::{DynamicTypePath, TypeRegistry};
@@ -20,6 +20,7 @@ use crate::image::{Image, ImageCreateInfo};
 use azart_gfx_utils::{Format, MsaaCount, ShaderPath, TriangleFillMode};
 use azart_utils::debug_string::*;
 use azart_gfx_utils::{asset_path, shader_path};
+use bevy::tasks::{ComputeTaskPool, ParallelSliceMut, TaskPool};
 use gpu_allocator::MemoryLocation;
 use std140::repr_std140;
 use crate::buffer::{Buffer, BufferCreateInfo};
@@ -71,31 +72,31 @@ pub struct ViewMatrices {
 pub const CUBE_VERTICES: [Vertex; 24] = [
 	// -------------------------
 	// FRONT FACE (+Z)
-	Vertex::new(Vec3::new(-1.0, -1.0,  1.0), Vec2::new(0.0, 0.0)), // 0
-	Vertex::new(Vec3::new( 1.0, -1.0,  1.0), Vec2::new(1.0, 0.0)), // 1
-	Vertex::new(Vec3::new( 1.0,  1.0,  1.0), Vec2::new(1.0, 1.0)), // 2
-	Vertex::new(Vec3::new(-1.0,  1.0,  1.0), Vec2::new(0.0, 1.0)), // 3
+	Vertex::new(Vec3::new(-1.0, 1.0,  1.0), Vec2::new(0.0, 0.0)), // 0
+	Vertex::new(Vec3::new( 1.0, 1.0,  1.0), Vec2::new(1.0, 0.0)), // 1
+	Vertex::new(Vec3::new( 1.0,  -1.0,  1.0), Vec2::new(1.0, 1.0)), // 2
+	Vertex::new(Vec3::new(-1.0,  -1.0,  1.0), Vec2::new(0.0, 1.0)), // 3
 
 	// -------------------------
 	// RIGHT FACE (+X)
-	Vertex::new(Vec3::new( 1.0, -1.0,  1.0), Vec2::new(0.0, 0.0)), // 4
-	Vertex::new(Vec3::new( 1.0, -1.0, -1.0), Vec2::new(1.0, 0.0)), // 5
-	Vertex::new(Vec3::new( 1.0,  1.0, -1.0), Vec2::new(1.0, 1.0)), // 6
-	Vertex::new(Vec3::new( 1.0,  1.0,  1.0), Vec2::new(0.0, 1.0)), // 7
+	Vertex::new(Vec3::new( 1.0, 1.0,  1.0), Vec2::new(0.0, 0.0)), // 4
+	Vertex::new(Vec3::new( 1.0, 1.0, -1.0), Vec2::new(1.0, 0.0)), // 5
+	Vertex::new(Vec3::new( 1.0,  -1.0, -1.0), Vec2::new(1.0, 1.0)), // 6
+	Vertex::new(Vec3::new( 1.0,  -1.0,  1.0), Vec2::new(0.0, 1.0)), // 7
 
 	// -------------------------
 	// BACK FACE (-Z)
-	Vertex::new(Vec3::new( 1.0, -1.0, -1.0), Vec2::new(0.0, 0.0)), // 8
-	Vertex::new(Vec3::new(-1.0, -1.0, -1.0), Vec2::new(1.0, 0.0)), // 9
-	Vertex::new(Vec3::new(-1.0,  1.0, -1.0), Vec2::new(1.0, 1.0)), // 10
-	Vertex::new(Vec3::new( 1.0,  1.0, -1.0), Vec2::new(0.0, 1.0)), // 11
+	Vertex::new(Vec3::new( 1.0, 1.0, -1.0), Vec2::new(0.0, 0.0)), // 8
+	Vertex::new(Vec3::new(-1.0, 1.0, -1.0), Vec2::new(1.0, 0.0)), // 9
+	Vertex::new(Vec3::new(-1.0,  -1.0, -1.0), Vec2::new(1.0, 1.0)), // 10
+	Vertex::new(Vec3::new( 1.0,  -1.0, -1.0), Vec2::new(0.0, 1.0)), // 11
 
 	// -------------------------
 	// LEFT FACE (-X)
-	Vertex::new(Vec3::new(-1.0, -1.0, -1.0), Vec2::new(0.0, 0.0)), // 12
-	Vertex::new(Vec3::new(-1.0, -1.0,  1.0), Vec2::new(1.0, 0.0)), // 13
-	Vertex::new(Vec3::new(-1.0,  1.0,  1.0), Vec2::new(1.0, 1.0)), // 14
-	Vertex::new(Vec3::new(-1.0,  1.0, -1.0), Vec2::new(0.0, 1.0)), // 15
+	Vertex::new(Vec3::new(-1.0, 1.0, -1.0), Vec2::new(0.0, 0.0)), // 12
+	Vertex::new(Vec3::new(-1.0, 1.0,  1.0), Vec2::new(1.0, 0.0)), // 13
+	Vertex::new(Vec3::new(-1.0,  -1.0,  1.0), Vec2::new(1.0, 1.0)), // 14
+	Vertex::new(Vec3::new(-1.0,  -1.0, -1.0), Vec2::new(0.0, 1.0)), // 15
 
 	// -------------------------
 	// TOP FACE (+Y)
@@ -111,7 +112,6 @@ pub const CUBE_VERTICES: [Vertex; 24] = [
 	Vertex::new(Vec3::new( 1.0, -1.0,  1.0), Vec2::new(1.0, 1.0)), // 22
 	Vertex::new(Vec3::new(-1.0, -1.0,  1.0), Vec2::new(0.0, 1.0)), // 23
 ];
-
 
 /// 36 indices (12 triangles) referencing the 24 unique vertices above
 pub const CUBE_INDICES: [u16; 36] = [
@@ -136,7 +136,7 @@ pub const CUBE_INDICES: [u16; 36] = [
 ];
 
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct RenderPlugin {
 	pub settings: RenderSettings,
 }
@@ -467,9 +467,12 @@ fn render(
 
 			// Update uniforms.
 			{
-				let model_matrix = Mat4::from_rotation_y(((time.elapsed_secs() * 45.0) % 360.0).to_radians());
+				let model_matrix = Mat4::from_axis_angle(Vec3::new(1.0, 1.0, 0.0).normalize(), ((time.elapsed_secs() * 45.0) % 360.0).to_radians());
+				let mut perspective = Mat4::perspective_rh(45.0f32.to_radians(), swapchain.extent().x as f32 / swapchain.extent().y as f32, 0.1, 100.0);
+				perspective.y_axis.y *= -1.0;
 				let per_frame_view_matrices = unsafe { slice::from_raw_parts_mut(model.view_matrices_buffer.allocation.mapped_ptr().unwrap().as_ptr() as *mut ViewMatrices, settings.frames_in_flight) };
 				per_frame_view_matrices[new_frame_index].model = unsafe { mem::transmute_copy(&model_matrix) };
+				per_frame_view_matrices[new_frame_index].proj = unsafe { mem::transmute_copy(&perspective) };
 			}
 			
 			{
@@ -605,7 +608,7 @@ unsafe fn record(
 		let frame = &swapchain.frames()[frame_index];
 		let image = frame.image;
 
-		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1);
+		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 0..1, 0..1);
 
 		let regions = [
 			vk::ImageCopy::default()
@@ -626,7 +629,7 @@ unsafe fn record(
 
 		context.device.cmd_copy_image(cmd, base_pass.color_attachment.handle, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
 
-		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, 1);
+		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, 0..1, 0..1);
 	}
 }
 
@@ -685,9 +688,7 @@ fn create_render_pass_on_primary_window_spawned(
 		};
 
 		let texture = {
-			//let path = asset_path("models/FlightHelmet/FlightHelmet_Materials_MetalPartsMat_OcclusionRoughMetal.png");
-
-			let path = asset_path("models/chom/chom.jpg");
+			let path = asset_path("models/chom/chom_festive.jpg");
 			let image_data = image::ImageReader::open(&*path)
 				.unwrap_or_else(|e| panic!("Failed to read data path {path:?}. Error: {e}"))
 				.decode()
@@ -698,28 +699,51 @@ fn create_render_pass_on_primary_window_spawned(
 				format: Format::RgbaU8Norm,
 				usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 				msaa: MsaaCount::None,
+				mip_count: MipCount::Max,
 				..default()
 			};
 
-			use image::DynamicImage::*;
-			let format = match &image_data {
-				ImageRgba8(_) => "rgba8",
-				ImageRgb8(_) => "rgb8",
-				ImageRgba16(_) => "rgba16",
-				ImageRgb16(_) => "rgb16",
-				_ => "unknown",
-			};
-
-			println!("Image format: {format:?}");
-
 			let image = Image::new("texture".into(), Arc::clone(&context), &create_info);
 
-			println!("Allocation size: {}", image.allocation.size());
-			context.upload_image_buffer(&image, |data| {
+			context.upload_image(&image, None, |mips| {
+				// Create first mip.
 				image_data
 					.pixels()
-					.zip(data.chunks_exact_mut(4))
+					.zip(mips[0].chunks_exact_mut(4))
 					.for_each(|((_, _, image::Rgba(rgba)), data)| data.copy_from_slice(&rgba));
+
+				// Generate subsequent mips.
+				for mip in 1..mips.len() {
+					let ([.., src], [dst, ..]) = mips.split_at_mut(mip) else {
+						unreachable!();
+					};
+
+					let prev_mip = mip - 1;
+
+					let width = (image.resolution.x as usize >> mip).max(1);
+					let prev_width = (image.resolution.x as usize >> prev_mip).max(1);
+					dst.par_chunk_map_mut(ComputeTaskPool::get(), 4, |i, data| {
+						let (x, y) = (i % width, i / width);
+						let mut aggregate = [0; 4];
+						let mut add = |offset_x, offset_y| {
+							let i = ((x * 2 + offset_x) + (y * 2 + offset_y) * prev_width) * 4;
+							aggregate
+								.iter_mut()
+								.zip(src[i..i + 4].iter())
+								.for_each(|(dst, src)| *dst += *src as u32);
+						};
+
+						add(0, 0);
+						add(1, 0);
+						add(0, 1);
+						add(1, 1);
+
+						data
+							.iter_mut()
+							.zip(aggregate.iter())
+							.for_each(|(dst, &src)| *dst = (src / 4) as u8);
+					});
+				}
 			});
 
 			image
@@ -760,7 +784,7 @@ fn create_render_pass_on_primary_window_spawned(
 		let view_matrices_buffer = {
 			let view_matrices = unsafe {
 				let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0));
-				let view = Mat4::look_at_rh(Vec3::new(5.0, 5.0, 5.0), Vec3::ZERO, Vec3::Y);
+				let view = Mat4::look_at_rh(Vec3::new(5.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
 				let proj = Mat4::perspective_rh(45.0f32.to_radians(), window.resolution.physical_size().x as f32 / window.resolution.physical_size().y as f32, 0.1, 100.0);
 
 				let mut proj = proj.to_cols_array_2d();
@@ -928,8 +952,10 @@ fn create_swapchain_on_window_spawned(
 			
 			let create_info = SwapchainCreateInfo {
 				present_mode: window.present_mode,
-				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
 				image_count: settings.frames_in_flight as u32,
+				format: Some(vk::Format::R8G8B8A8_SRGB),
+				color_space: Some(vk::ColorSpaceKHR::SRGB_NONLINEAR),
 				..default()
 			};
 			

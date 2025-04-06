@@ -8,6 +8,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use crate::GpuContext;
 use azart_gfx_utils::{MsaaCount, GpuResource, Format};
 use azart_utils::debug_string::DebugString;
+use bevy::reflect::Reflect;
 
 pub struct Image {
 	name: DebugString,
@@ -15,6 +16,8 @@ pub struct Image {
 	pub(crate) view: vk::ImageView,
 	pub(crate) allocation: ManuallyDrop<Allocation>,
 	pub(crate) resolution: UVec2,
+	layers: u32,
+	mips: u32,
 	pub(crate) format: Format,
 	pub(crate) usage: vk::ImageUsageFlags,
 	pub(crate) layout: vk::ImageLayout,
@@ -30,12 +33,13 @@ impl Image {
 	) -> Self {
 		let max_mip_levels = create_info.resolution.max_element().ilog2() + 1;
 		let mip_levels = match create_info.mip_count {
-			Some(x) => x.get().min(max_mip_levels),
-			None => max_mip_levels,
+			MipCount::None => 1,
+			MipCount::Max => max_mip_levels,
+			MipCount::Custom(mip_levels) => mip_levels.clamp(1, max_mip_levels),
 		};
 
 		let image = {
-			let flags = if create_info.array_layers == 1 { vk::ImageCreateFlags::empty() } else { vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE };
+			let flags = if create_info.layers == 1 { vk::ImageCreateFlags::empty() } else { vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE };
 
 			assert!(create_info.resolution.x > 0 && create_info.resolution.y > 0, "Resolution was {:?}! Must be greater than 0!", create_info.resolution);
 
@@ -99,7 +103,7 @@ impl Image {
 		let image_view = {
 			let create_info = vk::ImageViewCreateInfo::default()
 				.image(image)
-				.view_type(if create_info.array_layers == 1 { vk::ImageViewType::TYPE_2D } else { vk::ImageViewType::TYPE_2D_ARRAY })
+				.view_type(if create_info.layers == 1 { vk::ImageViewType::TYPE_2D } else { vk::ImageViewType::TYPE_2D_ARRAY })
 				.format(create_info.format.into())
 				.subresource_range(vk::ImageSubresourceRange::default()
 					.aspect_mask(match create_info.format.into() {
@@ -110,7 +114,7 @@ impl Image {
 					.base_mip_level(0)
 					.level_count(mip_levels)
 					.base_array_layer(0)
-					.layer_count(create_info.array_layers)
+					.layer_count(create_info.layers)
 				);
 
 			unsafe { context.device.create_image_view(&create_info, None) }.expect("failed to create image view!")
@@ -129,6 +133,8 @@ impl Image {
 			allocation: ManuallyDrop::new(allocation),
 			resolution: create_info.resolution,
 			format: create_info.format,
+			layers: create_info.layers,
+			mips: mip_levels,
 			usage: create_info.usage,
 			layout: create_info.initial_layout,
 			msaa: create_info.msaa,
@@ -139,6 +145,16 @@ impl Image {
 	#[inline(always)]
 	pub fn name(&self) -> &DebugString {
 		&self.name
+	}
+
+	#[inline(always)]
+	pub fn layers(&self) -> u32 {
+		self.layers
+	}
+
+	#[inline(always)]
+	pub fn mips(&self) -> u32 {
+		self.mips
 	}
 }
 
@@ -152,16 +168,18 @@ impl Drop for Image {
 	}
 }
 
+impl GpuResource for Image {}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ImageCreateInfo {
 	pub resolution: UVec2,
-	pub mip_count: Option<NonZero<u32>>,// If None the mip count will be decided based on the image extent.
+	pub mip_count: MipCount,// If None the mip count will be decided based on the image extent.
 	pub format: Format,
 	pub usage: vk::ImageUsageFlags,
 	pub initial_layout: vk::ImageLayout,
 	pub tiling: vk::ImageTiling,
 	pub msaa: MsaaCount,
-	pub array_layers: u32,
+	pub layers: u32,
 	pub memory: MemoryLocation,
 }
 
@@ -169,16 +187,22 @@ impl Default for ImageCreateInfo {
 	fn default() -> Self {
 		Self {
 			resolution: UVec2::new(1, 1),
-			mip_count: Some(NonZero::new(1).unwrap()),
+			mip_count: MipCount::None,
 			format: Format::RgbaU8Srgb,
 			usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 			initial_layout: vk::ImageLayout::UNDEFINED,
 			tiling: vk::ImageTiling::OPTIMAL,
 			msaa: MsaaCount::None,
-			array_layers: 1,
+			layers: 1,
 			memory: MemoryLocation::GpuOnly,
 		}
 	}
 }
 
-impl GpuResource for ImageCreateInfo {}
+#[derive(Default, Copy, Clone, PartialEq, Eq, Hash, Debug, Reflect)]
+pub enum MipCount {
+	#[default]
+	None,// No mips.
+	Max,// Max mips based on resolution.
+	Custom(u32),// User-defined will be clamped from 1..Max.
+}
