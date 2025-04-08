@@ -1,3 +1,4 @@
+use std::ptr::NonNull;
 use std::sync::Arc;
 use ash::vk;
 use azart_utils::debug_string::DebugString;
@@ -18,11 +19,4 @@ impl DescriptorSet {
 	) -> Self {
 		todo!();
 	}
-}
-
-#[derive(Resource)]
-pub struct DescriptorPool {
-	name: DebugString,
-	pub(crate) handle: vk::DescriptorPool,
-	pub(crate) context: Arc<GpuContext>,
 }

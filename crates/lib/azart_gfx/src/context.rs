@@ -5,9 +5,10 @@ use std::num::NonZero;
 use std::ops::{Deref, Range};
 use std::{mem, ptr, slice};
 use std::any::TypeId;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use ash::vk;
-use bevy::log::warn;
+use bevy::log::{error, info, warn};
 use bevy::math::UVec2;
 use bevy::prelude::{FromReflect, PartialReflect, Resource};
 use bevy::tasks::IoTaskPool;
@@ -51,7 +52,7 @@ impl GpuContext {
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 0] = [];
 
 	// List of core extensions.
-	const DEVICE_EXTENSION_NAMES: [&'static CStr; 10] = [
+	const DEVICE_EXTENSION_NAMES: [&'static CStr; 11] = [
 		ash::ext::descriptor_indexing::NAME,
 		ash::khr::buffer_device_address::NAME,
 		ash::khr::push_descriptor::NAME,
@@ -59,6 +60,7 @@ impl GpuContext {
 		ash::khr::swapchain::NAME,
 		ash::khr::multiview::NAME,
 		ash::khr::draw_indirect_count::NAME,
+		ash::khr::shader_draw_parameters::NAME,
 		ash::khr::create_renderpass2::NAME,
 		ash::khr::timeline_semaphore::NAME,
 		ash::khr::fragment_shading_rate::NAME,
@@ -244,6 +246,7 @@ impl GpuContext {
 			let extensions = Extensions {
 				swapchain: ash::khr::swapchain::Device::new(&instance, &device),
 				surface: ash::khr::surface::Instance::new(&entry, &instance),
+				draw_indirect_count: ash::khr::draw_indirect_count::Device::new(&instance, &device),
 				#[cfg(debug_assertions)]
 				debug_utils: ash::ext::debug_utils::Device::new(&instance, &device),
 			};
@@ -692,7 +695,7 @@ impl GpuContext {
 	}
 	
 	pub fn create_shader_module(&self, path: &ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
-		#[cfg(debug_assertions)]
+		/*#[cfg(debug_assertions)]
 		if !matches!(path.extension(), Some(ext) if ext.to_str().unwrap().ends_with("ron")) {
 			return Err(ShaderModuleError::NotSpv);
 		}
@@ -704,12 +707,25 @@ impl GpuContext {
 				std::io::ErrorKind::PermissionDenied => Err(ShaderModuleError::PermissionDenied(path.to_str().unwrap().to_owned())),
 				_ => Err(ShaderModuleError::UnknownFileError(path.to_str().unwrap().to_owned(), e)),
 			},
-		};
+		};*/
+
+		info!("File directory:\n");
+		let file_path = Path::new("/sdcard/Android/data");
+		//let file_path = std::env::current_exe().unwrap().join("..");
+		for entry in walkdir::WalkDir::new(file_path).into_iter().filter_map(|e| e.ok()) {
+			let indent  = "\t".repeat(entry.depth() * 4 + 1);
+			info!("{indent}{}", entry.path().display())
+		}
 
 		// Load Spirv struct from file.
 		let spirv = {
-			let mut file_contents = vec![];
-			file.read_to_end(&mut file_contents).expect("Failed to read shader file!");
+			//let mut file_contents = vec![];
+			//file.read_to_end(&mut file_contents).expect("Failed to read shader file!");
+			let file_contents = match path.0.to_str().unwrap() {
+				"assets/spv/shader.frag.ron" | "../../assets/spv/shader.frag.ron" => include_bytes!("../../../../assets/spv/shader.frag.ron").as_slice(),
+				"assets/spv/shader.vert.ron" | "../../assets/spv/shader.vert.ron" => include_bytes!("../../../../assets/spv/shader.vert.ron").as_slice(),
+				path => panic!("Invalid path {path}"),
+			};
 
 			let mut registry = TypeRegistry::new();
 			registry.register::<Spirv>();
@@ -755,7 +771,11 @@ impl GpuContext {
 			.object_name(name)
 			.object_handle(handle);
 
-		unsafe { self.extensions.debug_utils.set_debug_utils_object_name(&name_info) }.expect("Failed to set debug name!");
+		//unsafe { self.extensions.debug_utils.set_debug_utils_object_name(&name_info) }.expect("Failed to set debug name!");
+		let result = unsafe { self.extensions.debug_utils.set_debug_utils_object_name(&name_info) };
+		if let Err(e) = result {
+			error!("Failed to set debug name {}!: {e}", name.to_str().unwrap_or("<invalid>"));
+		}
 	}
 
 	// Handle must be valid and ensure this is only called from a single thread per-object!
@@ -785,6 +805,7 @@ pub struct QueueFamilies {
 pub struct Extensions {
 	pub swapchain: ash::khr::swapchain::Device,
 	pub surface: ash::khr::surface::Instance,
+	pub draw_indirect_count: ash::khr::draw_indirect_count::Device,
 	#[cfg(debug_assertions)]
 	pub debug_utils: ash::ext::debug_utils::Device,
 }

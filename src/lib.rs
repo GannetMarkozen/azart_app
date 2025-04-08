@@ -1,6 +1,7 @@
 use azart::*;
 use bevy::prelude::*;
 
+#[bevy_main]
 fn main() {
 	#[cfg(debug_assertions)]
 	{
@@ -18,5 +19,4 @@ fn load_flight_helmet(
 	mut commands: Commands,
 	asset_server: Res<AssetServer>,
 ) {
-	
 }

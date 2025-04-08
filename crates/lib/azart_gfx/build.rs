@@ -84,7 +84,7 @@ fn main() {
 		//compile_options.set_optimization_level(if release_build { shaderc::OptimizationLevel::Performance } else { shaderc::OptimizationLevel::Zero });
 		compile_options.set_auto_bind_uniforms(true);
 		compile_options.set_auto_map_locations(true);
-		compile_options.set_forced_version_profile(450, shaderc::GlslProfile::Core);
+		compile_options.set_forced_version_profile(460, shaderc::GlslProfile::Core);
 		compile_options.set_generate_debug_info();
 		compile_options.set_include_callback(|include, include_type, _, _| {
 			let path = path.parent().unwrap_or(path).join(include);

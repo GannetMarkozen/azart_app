@@ -6,7 +6,7 @@ use std::{mem, slice};
 use std::slice::Windows;
 use bevy::prelude::*;
 use std::sync::Arc;
-use bevy::window::{PresentMode, PrimaryWindow, RequestRedraw, WindowCreated, WindowResized};
+use bevy::window::{PresentMode, PrimaryWindow, RequestRedraw, WindowCreated, WindowEvent, WindowResized};
 use bevy::winit::{WakeUp, WinitWindows};
 use winit::event_loop::EventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -164,7 +164,20 @@ impl Plugin for RenderPlugin {
 		app
 			.add_systems(Startup, init)
 			.add_systems(Update, render);
+
+		app
+			.add_systems(Update, |query: Query<&Window, With<PrimaryWindow>>, mut events: EventReader<WindowEvent>| {
+				for event in events.read() {
+					println!("WINDOW_EVENT: {event:?}");
+				}
+			});
 	}
+}
+
+#[derive(Resource)]
+pub struct IndirectArgs {
+	pub args_buffer: Buffer,
+	pub count_buffer: Buffer,
 }
 
 #[derive(Resource)]
@@ -451,16 +464,19 @@ fn render(
 	mut base_pass: ResMut<BasePass>,
 	base_material: ResMut<BaseMaterial>,
 	model: Res<Model>,
+	indirect_args: Res<IndirectArgs>,
 	mut query: Query<&mut Swapchain>,
 	settings: Res<RenderSettings>,
 ) {
+	let start = std::time::Instant::now();
+	
 	unsafe {
 		for mut swapchain in query.iter_mut() {
 			let previous_frame_index = swapchain.current_frame_index;
 			
-			let (new_frame_index, suboptimal) = swapchain.acquire_next_image();
+			let (new_frame_index, new_image_index, suboptimal) = swapchain.acquire_next_image();
 			
-			let previous_frame = &swapchain.frames()[previous_frame_index];
+			let previous_frame = &swapchain.frames()[previous_frame_index.0];
 
 			let cmd = previous_frame.graphics_command_buffer;
 			context.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
@@ -471,8 +487,8 @@ fn render(
 				let mut perspective = Mat4::perspective_rh(45.0f32.to_radians(), swapchain.extent().x as f32 / swapchain.extent().y as f32, 0.1, 100.0);
 				perspective.y_axis.y *= -1.0;
 				let per_frame_view_matrices = unsafe { slice::from_raw_parts_mut(model.view_matrices_buffer.allocation.mapped_ptr().unwrap().as_ptr() as *mut ViewMatrices, settings.frames_in_flight) };
-				per_frame_view_matrices[new_frame_index].model = unsafe { mem::transmute_copy(&model_matrix) };
-				per_frame_view_matrices[new_frame_index].proj = unsafe { mem::transmute_copy(&perspective) };
+				per_frame_view_matrices[new_frame_index.0].model = unsafe { mem::transmute_copy(&model_matrix) };
+				per_frame_view_matrices[new_frame_index.0].proj = unsafe { mem::transmute_copy(&perspective) };
 			}
 			
 			{
@@ -482,8 +498,12 @@ fn render(
 				context.device.begin_command_buffer(cmd, &info).unwrap();
 			}
 			
-			record(cmd, &context, &base_pass, &base_material, &swapchain, &model, new_frame_index, &settings);
+			let start = std::time::Instant::now();
+			
+			record(cmd, &context, &base_pass, &base_material, &swapchain, &model, &indirect_args, new_frame_index.0, new_image_index.0, &settings);
 
+			println!("Record time {}", start.elapsed().as_millis());
+			
 			// End recording.
 			context.device.end_command_buffer(cmd).unwrap();
 
@@ -494,23 +514,31 @@ fn render(
 				.wait_semaphores(slice::from_ref(&previous_frame.image_available_semaphore))
 				.wait_dst_stage_mask(slice::from_ref(&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT))
 				.signal_semaphores(slice::from_ref(&previous_frame.render_finished_semaphore));
+			
+			let start = std::time::Instant::now();
 
 			context.device.queue_submit(queue, slice::from_ref(&submit_info), previous_frame.in_flight_fence).unwrap();
 
-			let image_indices = [new_frame_index as u32];
-
+			println!("Submit time: {}", start.elapsed().as_millis());
+			
+			let image_indices = [new_image_index.0 as u32];
+			
 			let present_info = vk::PresentInfoKHR::default()
 				.swapchains(slice::from_ref(&swapchain.handle))
 				.image_indices(&image_indices)
 				.wait_semaphores(slice::from_ref(&previous_frame.render_finished_semaphore));
 
+			let start = std::time::Instant::now();
+
 			let result = context.extensions.swapchain.queue_present(queue, &present_info);
+			
+			println!("Present time: {}", start.elapsed().as_millis());
 			
 			assert_ne!(result, Err(vk::Result::SUBOPTIMAL_KHR));
 
 			// Conditionally recreate swapchain if required.
-			if suboptimal || matches!(result, Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR)) {
-				info!("Swapchain is not optimal after present! Recreating...");
+			if suboptimal || matches!(result, /*Ok(true) |*/ Err(vk::Result::ERROR_OUT_OF_DATE_KHR)) {
+				info!("Swapchain is not optimal after present! Status: {:?}. Recreating...", (suboptimal, result));
 				
 				swapchain.recreate(None, None);
 
@@ -518,6 +546,8 @@ fn render(
 			}
 		}
 	}
+	
+	println!("Render time: {}", start.elapsed().as_millis());
 }
 
 unsafe fn record(
@@ -527,7 +557,9 @@ unsafe fn record(
 	base_material: &BaseMaterial,
 	swapchain: &Swapchain,
 	model: &Model,
+	indirect_args: &IndirectArgs,
 	frame_index: usize,
+	image_index: usize,
 	settings: &RenderSettings,
 ) {
 	// Begin render pass.
@@ -596,17 +628,20 @@ unsafe fn record(
 	
 	context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.handle);
 
-	context.device.cmd_draw_indexed(cmd, CUBE_INDICES.len() as u32, 2, 0, 0, 0);
+	//context.device.cmd_draw_indexed(cmd, CUBE_INDICES.len() as u32, 2, 0, 0, 0);
+	//context.device.cmd_draw_indexed_indirect_count(cmd, indirect_args.args_buffer.handle, 0, indirect_args.count_buffer.handle, 0, 100, size_of::<vk::DrawIndexedIndirectCommand>() as u32);
+
+	context.extensions.draw_indirect_count.cmd_draw_indexed_indirect_count(cmd, indirect_args.args_buffer.handle, 0, indirect_args.count_buffer.handle, 0, 3, size_of::<vk::DrawIndexedIndirectCommand>() as u32);
 
 	// End render pass.
+
 	{
 		context.device.cmd_end_render_pass(cmd);
 	}
 
 	// Copy image to swapchain.
 	{
-		let frame = &swapchain.frames()[frame_index];
-		let image = frame.image;
+		let image = swapchain.images()[image_index].image;
 
 		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 0..1, 0..1);
 
@@ -673,26 +708,14 @@ fn create_render_pass_on_primary_window_spawned(
 			unsafe { GraphicsPipeline::new("base_material".into(), Arc::clone(&context), base_pass.render_pass, &create_info) }
 		};
 
-		let descriptor_pool = {
-			let pool_sizes = [
-				vk::DescriptorPoolSize::default()
-					.ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-					.descriptor_count(1),
-			];
-
-			let create_info = vk::DescriptorPoolCreateInfo::default()
-				.max_sets(settings.frames_in_flight as u32)
-				.pool_sizes(&pool_sizes);
-
-			unsafe { context.device.create_descriptor_pool(&create_info, None) }.unwrap()
-		};
-
 		let texture = {
-			let path = asset_path("models/chom/chom_festive.jpg");
+			/*let path = asset_path("models/chom/chom_festive.jpg");
 			let image_data = image::ImageReader::open(&*path)
 				.unwrap_or_else(|e| panic!("Failed to read data path {path:?}. Error: {e}"))
 				.decode()
-				.expect("Failed to decode image {path:?}!");
+				.expect("Failed to decode image {path:?}!");*/
+
+			let image_data = image::load_from_memory(include_bytes!("../../../../assets/models/chom/chom_festive.jpg")).unwrap();
 
 			let create_info = ImageCreateInfo {
 				resolution: UVec2::new(image_data.width(), image_data.height()),
@@ -815,6 +838,20 @@ fn create_render_pass_on_primary_window_spawned(
 			buffer
 		};
 
+		let descriptor_pool = {
+			let pool_sizes = [
+				vk::DescriptorPoolSize::default()
+					.ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+					.descriptor_count(/*settings.frames_in_flight as u32*/1000),
+			];
+
+			let create_info = vk::DescriptorPoolCreateInfo::default()
+				.max_sets(settings.frames_in_flight as u32)
+				.pool_sizes(&pool_sizes);
+
+			unsafe { context.device.create_descriptor_pool(&create_info, None) }.unwrap()
+		};
+
 		let descriptor_sets = {
 			assert_eq!(pipeline.descriptor_set_layouts.len(), 1);
 
@@ -822,11 +859,14 @@ fn create_render_pass_on_primary_window_spawned(
 				.flat_map(|_| pipeline.descriptor_set_layouts.iter().copied())
 				.collect::<Vec<_>>();
 
+			println!("SET_LAYOUT_COUNT: {}", set_layouts.len());
+
 			let allocate_info = vk::DescriptorSetAllocateInfo::default()
 				.descriptor_pool(descriptor_pool)
 				.set_layouts(&set_layouts);
 
-			let descriptor_sets = unsafe { context.device.allocate_descriptor_sets(&allocate_info) }.unwrap();
+			let descriptor_sets = unsafe { context.device.allocate_descriptor_sets(&allocate_info) }
+				.unwrap_or_else(|e| panic!("Failed to allocate descriptor sets! {} frames in flight!: {e}", settings.frames_in_flight));
 
 			let sampler = {
 				let create_info = vk::SamplerCreateInfo::default()
@@ -918,6 +958,46 @@ fn create_render_pass_on_primary_window_spawned(
 			descriptor_sets,
 		};
 
+		let indirect_args = {
+			let args_buffer = Buffer::new("args_buffer".into(), Arc::clone(&context), &BufferCreateInfo {
+				size: size_of::<vk::DrawIndexedIndirectCommand>() * 3,
+				usage: vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+				memory: MemoryLocation::GpuOnly,
+			});
+
+			context.upload_buffer(&args_buffer, |data| {
+				unsafe {
+					let cmds = slice::from_raw_parts_mut(data.as_mut_ptr() as *mut _, 3);
+					for cmd in cmds {
+						*cmd = vk::DrawIndexedIndirectCommand {
+							index_count: CUBE_INDICES.len() as _,
+							instance_count: 1,
+							first_index: 0,
+							vertex_offset: 0,
+							first_instance: 0,
+						};
+					}
+				}
+			});
+
+			let count_buffer = Buffer::new("count_buffer".into(), Arc::clone(&context), &BufferCreateInfo {
+				size: size_of::<u32>(),
+				usage: vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+				memory: MemoryLocation::GpuOnly,
+			});
+
+			context.upload_buffer(&count_buffer, |data| {
+				unsafe {
+					*(data.as_mut_ptr() as *mut u32) = 2;
+				}
+			});
+
+			IndirectArgs {
+				args_buffer,
+				count_buffer,
+			}
+		};
+
 		commands.insert_resource(base_pass);
 		commands.insert_resource(base_material);
 		commands.insert_resource(Texture(texture));
@@ -927,6 +1007,7 @@ fn create_render_pass_on_primary_window_spawned(
 			vertex_buffer,
 			view_matrices_buffer,
 		});
+		commands.insert_resource(indirect_args);
 	}
 }
 
@@ -935,10 +1016,47 @@ fn create_swapchain_on_window_spawned(
 	mut events: EventReader<WindowCreated>,
 	context: Res<GpuContextHandle>,
 	windows: NonSend<WinitWindows>,
-	query: Query<&Window, Without<Swapchain>>,
+	query: Query<(Entity, &Window), Without<Swapchain>>,
 	settings: Res<RenderSettings>,
 ) {
-	for &WindowCreated { window: e } in events.read() {
+	for (e, window) in query.iter() {
+		let swapchain = {
+			// May not immediately return a both a valid display / window handle! Especially on Android where launching an app focused isn't supported!
+			let (display_handle, window_handle) = {
+				let window = windows.get_window(e).expect("Failed to get window for entity {e}!");
+
+				match (window.display_handle(), window.window_handle()) {
+					(Ok(display_handle), Ok(window_handle)) => (display_handle, window_handle),
+					(display_handle_result, window_handle_result) => {
+						#[cfg(debug_assertions)]
+						info!("Failed to create swapchain! Display: {:?}, Window: {:?}\n", display_handle_result.map(|_| ()), window_handle_result.map(|_| ()));
+						continue;
+					},
+				}
+			};
+
+			let create_info = SwapchainCreateInfo {
+				present_mode: window.present_mode,
+				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
+				image_count: settings.frames_in_flight as u32,
+				format: Some(vk::Format::R8G8B8A8_SRGB),
+				color_space: Some(vk::ColorSpaceKHR::SRGB_NONLINEAR),
+				..default()
+			};
+
+			println!("CREATING SWAPCHAIN FOR {e:?}");
+
+			Swapchain::new("swapchain".into(), Arc::clone(&context), display_handle, window_handle, &create_info)
+		};
+
+		println!("CREATED SWAPCHAIN FOR {e:?}");
+
+		// Unfortunate archetype traversal. Should happen very rarely though.
+		commands.entity(e).insert(swapchain);
+	}
+
+	//return;
+	/*for &WindowCreated { window: e } in events.read() {
 		// If this fails then there's already a swapchain associated with the entity.
 		let Ok(window) = query.get(e) else {
 			continue;
@@ -947,7 +1065,7 @@ fn create_swapchain_on_window_spawned(
 		let swapchain = {
 			let (display_handle, window_handle) = {
 				let window = windows.get_window(e).unwrap_or_else(|| panic!("Failed to get window for entity {e}!"));
-				(window.display_handle().unwrap(), window.window_handle().unwrap())
+				(window.display_handle().expect("Failed to get the native display handle!"), window.window_handle().expect("Failed to get the native window handle!"))
 			};
 			
 			let create_info = SwapchainCreateInfo {
@@ -964,5 +1082,5 @@ fn create_swapchain_on_window_spawned(
 
 		// Unfortunate archetype traversal. Should happen very rarely though.
 		commands.entity(e).insert(swapchain);
-	}
+	}*/
 }

@@ -13,8 +13,10 @@ pub struct Swapchain {
 	name: DebugString,
 	pub(crate) handle: vk::SwapchainKHR,
 	pub(crate) surface: vk::SurfaceKHR,
-	frames: Vec<FrameState>,
-	pub current_frame_index: usize,
+	frames: Box<[FrameState]>,
+	images: Box<[SwapchainImage]>,
+	pub current_frame_index: FrameIndex,
+	pub current_image_index: SwapchainImageIndex,
 	pub present_queue_family: u32,
 	extent: UVec2,
 	format: vk::Format,
@@ -86,28 +88,9 @@ impl Swapchain {
 
 			unsafe { context.extensions.swapchain.create_swapchain(&create_info, None) }.unwrap()
 		};
-
-		let frames = unsafe { context.extensions.swapchain.get_swapchain_images(swapchain) }
-			.unwrap()
-			.into_iter()
-			.enumerate()
-			.map(|(i, image)| {
-				let image_view = {
-					let create_info = vk::ImageViewCreateInfo::default()
-						.image(image)
-						.view_type(vk::ImageViewType::TYPE_2D)
-						.format(format)
-						.subresource_range(vk::ImageSubresourceRange::default()
-							.aspect_mask(vk::ImageAspectFlags::COLOR)
-							.base_mip_level(0)
-							.level_count(1)
-							.base_array_layer(0)
-							.layer_count(1)
-						);
-
-					unsafe { context.device.create_image_view(&create_info, None) }.expect("Failed to create image view!")
-				};
-
+		
+		let frames = (0..create_info.image_count)
+			.map(|i| {
 				let graphics_command_pool = {
 					let create_info = vk::CommandPoolCreateInfo::default()
 						.queue_family_index(context.queue_families.graphics)
@@ -145,8 +128,6 @@ impl Swapchain {
 
 				#[cfg(debug_assertions)]
 				unsafe {
-					context.set_debug_name(format!("{name}_image[{i}]").as_str(), image);
-					context.set_debug_name(format!("{name}_image_view[{i}]").as_str(), image_view);
 					context.set_debug_name(format!("{name}_graphics_command_pool[{i}]").as_str(), graphics_command_pool);
 					context.set_debug_name(format!("{name}_graphics_command_buffer[{i}]").as_str(), graphics_command_buffer);
 					context.set_debug_name(format!("{name}_in_flight_fence[{i}]").as_str(), in_flight_fence);
@@ -154,8 +135,6 @@ impl Swapchain {
 				}
 
 				FrameState {
-					image,
-					image_view,
 					graphics_command_pool,
 					graphics_command_buffer,
 					in_flight_fence,
@@ -163,7 +142,41 @@ impl Swapchain {
 					render_finished_semaphore,
 				}
 			})
-			.collect::<Vec<_>>();
+			.collect::<Box<_>>();
+
+		let images = unsafe { context.extensions.swapchain.get_swapchain_images(swapchain) }
+			.unwrap()
+			.into_iter()
+			.enumerate()
+			.map(|(i, image)| {
+				let image_view = {
+					let create_info = vk::ImageViewCreateInfo::default()
+						.image(image)
+						.view_type(vk::ImageViewType::TYPE_2D)
+						.format(format)
+						.subresource_range(vk::ImageSubresourceRange::default()
+							.aspect_mask(vk::ImageAspectFlags::COLOR)
+							.base_mip_level(0)
+							.level_count(1)
+							.base_array_layer(0)
+							.layer_count(1)
+						);
+
+					unsafe { context.device.create_image_view(&create_info, None) }.expect("Failed to create image view!")
+				};
+				
+				#[cfg(debug_assertions)]
+				unsafe {
+					context.set_debug_name(format!("{name}_image[{i}]").as_str(), image);
+					context.set_debug_name(format!("{name}_image_view[{i}]").as_str(), image_view);
+				}
+				
+				SwapchainImage {
+					image,
+					image_view,
+				}
+			})
+			.collect::<Box<_>>();
 
 		let present_queue_family = {
 			let surface_ext = ash::khr::surface::Instance::new(&context.entry, &context.instance);
@@ -187,7 +200,9 @@ impl Swapchain {
 			handle: swapchain,
 			surface,
 			frames,
-			current_frame_index: 0,
+			images,
+			current_frame_index: FrameIndex(0),
+			current_image_index: SwapchainImageIndex(0),
 			present_queue_family,
 			extent,
 			format,
@@ -199,11 +214,20 @@ impl Swapchain {
 	}
 
 	// Returns the new frame index (reflects the value of self.current_frame_index) and whether the surface is suboptimal for the swapchain (the swapchain should be recreated but it's still renderable to).
-	pub fn acquire_next_image(&mut self) -> (usize, bool) {
+	pub fn acquire_next_image(&mut self) -> (FrameIndex, SwapchainImageIndex, bool) {
+		
+		let start = std::time::Instant::now();
+		
 		// Wait for frame to finish rendering.
-		unsafe { self.context.device.wait_for_fences(slice::from_ref(&self.frames[self.current_frame_index].in_flight_fence), true, u64::MAX) }.unwrap();
+		unsafe { self.context.device.wait_for_fences(slice::from_ref(&self.frames[self.current_frame_index.0].in_flight_fence), true, u64::MAX) }.unwrap();
+		
+		println!("Wait time for previous frame {}", start.elapsed().as_millis());
+		
+		let start = std::time::Instant::now();
 
-		let result = unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index].image_available_semaphore, vk::Fence::null()) };
+		let result = unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) };
+		
+		println!("Wait time for acquire next image {}", start.elapsed().as_millis());
 
 		assert_ne!(result, Err(vk::Result::SUBOPTIMAL_KHR));
 
@@ -214,20 +238,19 @@ impl Swapchain {
 
 				self.recreate(None, None);
 
-				unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index].image_available_semaphore, vk::Fence::null()) }
+				unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) }
 					.expect("Failed to acquire next image event after recreating swapchain!")
 			},
 			Err(e) => panic!("Failed to acquire next image. Error: {:?}", e),
 		};
 
 		// Reset fence only after successfully acquiring the next image.
-		unsafe { self.context.device.reset_fences(slice::from_ref(&self.frames[self.current_frame_index].in_flight_fence)) }.unwrap();
+		unsafe { self.context.device.reset_fences(slice::from_ref(&self.frames[self.current_frame_index.0].in_flight_fence)) }.unwrap();
 		
-		self.current_frame_index = index as usize;
-		
-		assert!(self.current_frame_index < self.frames.len());
+		self.current_frame_index = FrameIndex((self.current_frame_index.0 + 1) % self.frames.len());
+		self.current_image_index = SwapchainImageIndex(index as usize);
 
-		(self.current_frame_index, suboptimal)
+		(self.current_frame_index, self.current_image_index, suboptimal)
 	}
 
 	// If extent is None it will be resized to match the surface. Returns whether a resize actually occured or not (no resize if the extent matches the current extent).
@@ -258,7 +281,8 @@ impl Swapchain {
 
 		// Wait for all work being done to finish before recreation.
 		// NOTE: This can be avoided by keeping around the old swapchain for the duration it's used.
-		let frame_in_flight_fences = self.frames
+		let frame_in_flight_fences = self
+			.frames
 			.iter()
 			.map(|frame| frame.in_flight_fence)
 			.collect::<Vec<_>>();
@@ -270,7 +294,7 @@ impl Swapchain {
 		let new_swapchain = {
 			let create_info = vk::SwapchainCreateInfoKHR::default()
 				.surface(self.surface)
-				.min_image_count(self.frames.len() as u32)
+				.min_image_count(self.images.len() as u32)
 				.image_format(self.format)
 				.image_color_space(self.color_space)
 				.image_extent(vk::Extent2D {
@@ -290,11 +314,11 @@ impl Swapchain {
 		};
 
 		let images = unsafe { self.context.extensions.swapchain.get_swapchain_images(new_swapchain) }.unwrap();
-		assert_eq!(images.len(), self.frames.len());
+		assert_eq!(images.len(), self.images.len());
 
 		// Destroy image views for old swapchain before destroying the old swapchain.
-		for i in 0..self.frames.len() {
-			let frame = &mut self.frames[i];
+		for i in 0..self.images.len() {
+			let frame = &mut self.images[i];
 
 			// Destroy image view for old swapchain image.
 			unsafe { self.context.device.destroy_image_view(frame.image_view, None) };
@@ -323,7 +347,8 @@ impl Swapchain {
 
 		self.handle = new_swapchain;
 		self.extent = extent;
-		self.current_frame_index = 0;
+		self.current_frame_index = FrameIndex(0);
+		self.current_image_index = SwapchainImageIndex(0);
 
 		true
 	}
@@ -341,6 +366,10 @@ impl Swapchain {
 
 	pub fn context(&self) -> &GpuContext {
 		&*self.context
+	}
+	
+	pub fn images(&self) -> &[SwapchainImage] {
+		&self.images
 	}
 
 	pub fn frames(&self) -> &[FrameState] {
@@ -367,7 +396,8 @@ impl Swapchain {
 impl Drop for Swapchain {
 	fn drop(&mut self) {
 		unsafe {
-			let frame_in_flight_fences = self.frames
+			let frame_in_flight_fences = self
+				.frames
 				.iter()
 				.map(|frame| frame.in_flight_fence)
 				.collect::<Vec<_>>();
@@ -375,9 +405,11 @@ impl Drop for Swapchain {
 			let device = &self.context.device;
 			device.wait_for_fences(&frame_in_flight_fences, true, u64::MAX).unwrap();
 			
+			for image in self.images.iter() {
+				device.destroy_image_view(image.image_view, None);
+			}
+			
 			for frame in self.frames.iter() {
-				device.destroy_image_view(frame.image_view, None);
-				
 				device.free_command_buffers(frame.graphics_command_pool, slice::from_ref(&frame.graphics_command_buffer));
 				device.destroy_command_pool(frame.graphics_command_pool, None);
 				
@@ -414,12 +446,33 @@ impl Default for SwapchainCreateInfo {
 	}
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrameIndex(pub usize);
+
+impl From<usize> for FrameIndex {
+	fn from(i: usize) -> Self {
+		Self(i)
+	}
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SwapchainImageIndex(pub usize);
+
+impl From<usize> for SwapchainImageIndex {
+	fn from(i: usize) -> Self {
+		Self(i)
+	}
+}
+
 pub struct FrameState {
-	pub image: vk::Image,
-	pub image_view: vk::ImageView,
 	pub graphics_command_pool: vk::CommandPool,
 	pub graphics_command_buffer: vk::CommandBuffer,
 	pub in_flight_fence: vk::Fence,
 	pub image_available_semaphore: vk::Semaphore,
 	pub render_finished_semaphore: vk::Semaphore,
+}
+
+pub struct SwapchainImage {
+	pub image: vk::Image,
+	pub image_view: vk::ImageView,
 }

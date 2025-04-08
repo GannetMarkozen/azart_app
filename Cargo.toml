@@ -2,11 +2,18 @@
 name = "azart_app"
 version = "0.1.0"
 edition = "2024"
+build = "src/build.rs"
+authors = ["Gannet Markozen"]
+include = ["src/**", "crates/**", "assets/**"]
+
+[lib]
+name = "azart_app"
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 azart = { path = "crates/lib/azart" }
-bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
-color-eyre = "0.6.3"
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded", "android-native-activity"] }
+color-eyre = { version = "0.6.3" }
 
 [build-dependencies]
 azart = { path = "crates/lib/azart" }
@@ -15,6 +22,18 @@ glsl = "7.0.0"
 shaderc = "0.9.1"
 walkdir = "2.5.0"
 spirv-reflect = "0.2.3"
+android-tools = "0.2.11"
+
+[profile.release]
+opt-level = 3
+strip = "symbols"
+debug = 1
+
+[profile.dev]
+opt-level = 1
+incremental = true
+lto = false
+debug = 1
 
 [profile.release.package."spirv-reflect"]
 debug-assertions = false # Crashes.
@@ -22,12 +41,67 @@ debug-assertions = false # Crashes.
 [profile.dev.package."spirv-reflect"]
 debug-assertions = false # Crashes.
 
-[profile.release]
-opt-level = 3
-strip = "symbols"
-debug-assertions = false
+[package.metadata.android]
+package = "com.gan.azart_app"
+build_targets = ["aarch64-linux-android"]
+runtime_libs = "runtime_libs"
+apk_name = "azart_app"
+label = "Azart App"
+assets = ["assets"]
 
-[profile.dev]
-debug = 1
-incremental = true
-lto = false
+[package.metadata.android.sdk]
+min_sdk_version = 32
+target_sdk_version = 32
+
+[package.metadata.android.application]
+
+[[package.metadata.android.application.meta_data]]
+name = "com.samsung.android.vr.application.mode"
+value = "vr_only"
+
+[[package.metadata.android.application.meta_data]]
+name = "com.oculus.supportedDevices"
+value = "quest|quest2|questPro|quest3"
+
+[package.metadata.android.application.activity]
+theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
+config_changes = "density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
+launch_mode = "singleTask"
+orientation = "landscape"
+resizable_activity = false
+
+[[package.metadata.android.use_feature]]
+name = "android.hardware.vr.headtracking"
+required = true
+
+[[package.metadata.android.use_feature]]
+name = "oculus.software.handtracking"
+required = true
+
+[[package.metadata.android.uses_feature]]
+name = "oculus.software.handtracking"
+required = true
+
+[[package.metadata.android.uses_feature]]
+name = "com.oculus.feature.PASSTHROUGH"
+required = false
+enabled = false
+
+[[package.metadata.android.uses_feature]]
+name = "com.oculus.experimental.enabled"
+required = true
+
+[[package.metadata.android.uses_permission]]
+name = "com.oculus.permission.HAND_TRACKING"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = [
+    "com.oculus.intent.category.VR",
+    "android.intent.category.LAUNCHER",
+    "org.khronos.openxr.intent.category.IMMERSIVE_HMD",
+]
+
+[package.metadata.android.signing.release]
+path = "~/.android/debug.keystore"
+keystore_password = "android"
