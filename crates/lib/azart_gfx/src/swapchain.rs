@@ -1,4 +1,4 @@
-use std::slice;
+use std::{mem, slice};
 use azart_utils::debug_string::DebugString;
 use std::sync::Arc;
 use bevy::prelude::*;
@@ -23,6 +23,7 @@ pub struct Swapchain {
 	color_space: vk::ColorSpaceKHR,
 	present_mode: PresentMode,
 	image_usage_flags: vk::ImageUsageFlags,
+	current_transform: vk::SurfaceTransformFlagsKHR,
 	pub(crate) context: Arc<GpuContext>,
 }
 
@@ -51,9 +52,9 @@ impl Swapchain {
 				})
 		};
 
+		let capabilities = unsafe { context.extensions.surface.get_physical_device_surface_capabilities(context.physical_device, surface) }.unwrap();
 		let extent = {
-			let capabilities = unsafe { context.extensions.surface.get_physical_device_surface_capabilities(context.physical_device, surface) }.unwrap();
-			match create_info.extent {
+			let mut extent = match create_info.extent {
 				Some(extent) => UVec2 {
 					x: extent.x.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
 					y: extent.y.clamp(capabilities.min_image_extent.height, capabilities.max_image_extent.height),
@@ -62,7 +63,13 @@ impl Swapchain {
 					x: capabilities.current_extent.width,
 					y: capabilities.current_extent.height,
 				},
+			};
+
+			if matches!(capabilities.current_transform, vk::SurfaceTransformFlagsKHR::ROTATE_90 | vk::SurfaceTransformFlagsKHR::ROTATE_270) {
+				mem::swap(&mut extent.x, &mut extent.y);
 			}
+
+			extent
 		};
 
 		let swapchain = {
@@ -80,10 +87,13 @@ impl Swapchain {
 				.image_array_layers(1)
 				.image_usage(create_info.usage)
 				.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-				.pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-				.composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+				.pre_transform(capabilities.current_transform)
 				.present_mode(Self::vk_present_mode(create_info.present_mode))
 				.clipped(true)
+				.composite_alpha(match capabilities.supported_composite_alpha.contains(vk::CompositeAlphaFlagsKHR::OPAQUE) {
+					true => vk::CompositeAlphaFlagsKHR::OPAQUE,
+					false => vk::CompositeAlphaFlagsKHR::from_raw(capabilities.supported_composite_alpha.as_raw() & capabilities.supported_composite_alpha.as_raw().wrapping_neg()),// Selects first set bit.
+				})
 				.old_swapchain(vk::SwapchainKHR::null());
 
 			unsafe { context.extensions.swapchain.create_swapchain(&create_info, None) }.unwrap()
@@ -209,6 +219,7 @@ impl Swapchain {
 			color_space,
 			present_mode: create_info.present_mode,
 			image_usage_flags: create_info.usage,
+			current_transform: capabilities.current_transform,
 			context,
 		}
 	}
@@ -221,13 +232,9 @@ impl Swapchain {
 		// Wait for frame to finish rendering.
 		unsafe { self.context.device.wait_for_fences(slice::from_ref(&self.frames[self.current_frame_index.0].in_flight_fence), true, u64::MAX) }.unwrap();
 		
-		println!("Wait time for previous frame {}", start.elapsed().as_millis());
-		
 		let start = std::time::Instant::now();
 
 		let result = unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) };
-		
-		println!("Wait time for acquire next image {}", start.elapsed().as_millis());
 
 		assert_ne!(result, Err(vk::Result::SUBOPTIMAL_KHR));
 
@@ -235,6 +242,10 @@ impl Swapchain {
 			Ok((index, suboptimal)) => (index, suboptimal),
 			Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
 				info!("Swapchain is out of date during acquire_next_image. Recreating...");
+
+				// Wait for the GPU to go idle before doing anything.
+				// @NOTE: This is very expensive...
+				self.context.wait_idle();
 
 				self.recreate(None, None);
 
@@ -258,16 +269,23 @@ impl Swapchain {
 		assert_ne!(self.surface, vk::SurfaceKHR::null());
 
 		let capabilities = unsafe { self.context.extensions.surface.get_physical_device_surface_capabilities(self.context.physical_device, self.surface) }.unwrap();
+		let extent = {
+			let mut extent = match extent {
+				Some(extent) => UVec2 {
+					x: extent.x.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
+					y: extent.y.clamp(capabilities.min_image_extent.height, capabilities.max_image_extent.height),
+				},
+				None => UVec2 {
+					x: capabilities.current_extent.width.max(1),
+					y: capabilities.current_extent.height.max(1),
+				}
+			};
 
-		let extent = match extent {
-			Some(extent) => UVec2 {
-				x: extent.x.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
-				y: extent.y.clamp(capabilities.min_image_extent.height, capabilities.max_image_extent.height),
-			},
-			None => UVec2 {
-				x: capabilities.current_extent.width.max(1),
-				y: capabilities.current_extent.height.max(1),
+			if matches!(capabilities.current_transform, vk::SurfaceTransformFlagsKHR::ROTATE_90 | vk::SurfaceTransformFlagsKHR::ROTATE_270) {
+				mem::swap(&mut extent.x, &mut extent.y);
 			}
+
+			extent
 		};
 
 		if self.extent == extent || matches!(present_mode, Some(x) if x != self.present_mode) {
@@ -304,10 +322,13 @@ impl Swapchain {
 				.image_array_layers(1)
 				.image_usage(self.image_usage_flags)
 				.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-				.pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-				.composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+				.pre_transform(capabilities.current_transform)
 				.present_mode(Self::vk_present_mode(self.present_mode))
 				.clipped(true)
+				.composite_alpha(match capabilities.supported_composite_alpha.contains(vk::CompositeAlphaFlagsKHR::OPAQUE) {
+					true => vk::CompositeAlphaFlagsKHR::OPAQUE,
+					false => vk::CompositeAlphaFlagsKHR::from_raw(capabilities.supported_composite_alpha.as_raw() & capabilities.supported_composite_alpha.as_raw().wrapping_neg()),// Selects first set bit.
+				})
 				.old_swapchain(self.handle);
 
 			unsafe { self.context.extensions.swapchain.create_swapchain(&create_info, None) }.expect("failed to create swapchain!")
@@ -349,6 +370,7 @@ impl Swapchain {
 		self.extent = extent;
 		self.current_frame_index = FrameIndex(0);
 		self.current_image_index = SwapchainImageIndex(0);
+		self.current_transform = capabilities.current_transform;
 
 		true
 	}
@@ -391,6 +413,10 @@ impl Swapchain {
 	pub fn present_mode(&self) -> PresentMode {
 		self.present_mode
 	}
+
+	#[inline(always)]
+	pub fn current_transform(&self) -> vk::SurfaceTransformFlagsKHR {
+		self.current_transform }
 }
 
 impl Drop for Swapchain {

@@ -21,6 +21,7 @@ use crate::Image;
 use azart_gfx_utils::misc::{MsaaCount, ShaderPath};
 use azart_gfx_utils::spirv::Spirv;
 use azart_utils::debug_string::{DebugString, dbgfmt};
+use azart_utils::io;
 use bevy::asset::ron;
 use bevy::reflect::serde::{ReflectDeserializer, TypedReflectDeserializer};
 use bevy::reflect::TypeRegistry;
@@ -47,12 +48,14 @@ impl GpuContext {
 	const INSTANCE_LAYER_NAMES: [&'static CStr; 0] = [];
 
 	#[cfg(debug_assertions)]
-	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 1] = [ash::ext::debug_utils::NAME];
+	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 1] = [
+		ash::ext::debug_utils::NAME
+	];
 	#[cfg(not(debug_assertions))]
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 0] = [];
 
 	// List of core extensions.
-	const DEVICE_EXTENSION_NAMES: [&'static CStr; 11] = [
+	const DEVICE_EXTENSION_NAMES: [&'static CStr; 10] = [
 		ash::ext::descriptor_indexing::NAME,
 		ash::khr::buffer_device_address::NAME,
 		ash::khr::push_descriptor::NAME,
@@ -63,7 +66,7 @@ impl GpuContext {
 		ash::khr::shader_draw_parameters::NAME,
 		ash::khr::create_renderpass2::NAME,
 		ash::khr::timeline_semaphore::NAME,
-		ash::khr::fragment_shading_rate::NAME,
+		//ash::khr::fragment_shading_rate::NAME,
 	];
 
 	pub fn new(extensions: &[&CStr]) -> Self {
@@ -695,37 +698,9 @@ impl GpuContext {
 	}
 	
 	pub fn create_shader_module(&self, path: &ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
-		/*#[cfg(debug_assertions)]
-		if !matches!(path.extension(), Some(ext) if ext.to_str().unwrap().ends_with("ron")) {
-			return Err(ShaderModuleError::NotSpv);
-		}
-
-		let mut file = match std::fs::File::open(&**path) {
-			Ok(file) => file,
-			Err(e) => return match e.kind() {
-				std::io::ErrorKind::NotFound => Err(ShaderModuleError::InvalidPath(path.to_str().unwrap().to_owned())),
-				std::io::ErrorKind::PermissionDenied => Err(ShaderModuleError::PermissionDenied(path.to_str().unwrap().to_owned())),
-				_ => Err(ShaderModuleError::UnknownFileError(path.to_str().unwrap().to_owned(), e)),
-			},
-		};*/
-
-		info!("File directory:\n");
-		let file_path = Path::new("/sdcard/Android/data");
-		//let file_path = std::env::current_exe().unwrap().join("..");
-		for entry in walkdir::WalkDir::new(file_path).into_iter().filter_map(|e| e.ok()) {
-			let indent  = "\t".repeat(entry.depth() * 4 + 1);
-			info!("{indent}{}", entry.path().display())
-		}
-
 		// Load Spirv struct from file.
 		let spirv = {
-			//let mut file_contents = vec![];
-			//file.read_to_end(&mut file_contents).expect("Failed to read shader file!");
-			let file_contents = match path.0.to_str().unwrap() {
-				"assets/spv/shader.frag.ron" | "../../assets/spv/shader.frag.ron" => include_bytes!("../../../../assets/spv/shader.frag.ron").as_slice(),
-				"assets/spv/shader.vert.ron" | "../../assets/spv/shader.vert.ron" => include_bytes!("../../../../assets/spv/shader.vert.ron").as_slice(),
-				path => panic!("Invalid path {path}"),
-			};
+			let file_contents = io::read(&path.0).unwrap_or_else(|e| panic!("Failed to read shader file {path:?}: {e}"));
 
 			let mut registry = TypeRegistry::new();
 			registry.register::<Spirv>();
@@ -810,6 +785,7 @@ pub struct Extensions {
 	pub debug_utils: ash::ext::debug_utils::Device,
 }
 
+#[derive(Debug)]
 pub struct Capabilities {
 	pub max_msaa: MsaaCount,
 }

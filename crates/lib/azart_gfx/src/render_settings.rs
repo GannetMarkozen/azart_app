@@ -10,7 +10,7 @@ pub struct RenderSettings {
 impl Default for RenderSettings {
 	fn default() -> Self {
 		Self {
-			msaa: MsaaCount::Sample8,
+			msaa: MsaaCount::Sample4,
 			frames_in_flight: 2,
 		}
 	}

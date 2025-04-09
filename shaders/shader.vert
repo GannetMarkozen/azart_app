@@ -38,7 +38,7 @@ void main() {
     out_uv = uvs[gl_VertexIndex];*/
 
     const float OFFSET = 2.5;
-    const vec3 actual_pos = pos + vec3(0.0, gl_DrawID * OFFSET - (OFFSET / 2), 0.0);
+    const vec3 actual_pos = pos + vec3(0.0, (gl_DrawID * 2 + gl_InstanceIndex) * OFFSET - (OFFSET / 2), 0.0);
     gl_Position = view.proj * view.view * view.model * vec4(actual_pos, 1.0);
     out_uv = uv;
 }

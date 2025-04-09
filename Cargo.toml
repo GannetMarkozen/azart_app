@@ -45,9 +45,9 @@ debug-assertions = false # Crashes.
 package = "com.gan.azart_app"
 build_targets = ["aarch64-linux-android"]
 runtime_libs = "runtime_libs"
-apk_name = "azart_app"
+apk_name = "something"
 label = "Azart App"
-assets = ["assets"]
+assets = "assets/*"
 
 [package.metadata.android.sdk]
 min_sdk_version = 32

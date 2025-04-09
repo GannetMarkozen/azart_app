@@ -1,8 +1,9 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::mem::offset_of;
 use std::num::NonZero;
 use std::ops::Deref;
 use std::{mem, slice};
+use std::path::Path;
 use std::slice::Windows;
 use bevy::prelude::*;
 use std::sync::Arc;
@@ -17,10 +18,12 @@ use bevy::reflect::{DynamicTypePath, TypeRegistry};
 use image::GenericImageView;
 use crate::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo, VertexAttribute, VertexInput};
 use crate::image::{Image, ImageCreateInfo};
+use azart_utils::io;
 use azart_gfx_utils::{Format, MsaaCount, ShaderPath, TriangleFillMode};
 use azart_utils::debug_string::*;
-use azart_gfx_utils::{asset_path, shader_path};
-use bevy::tasks::{ComputeTaskPool, ParallelSliceMut, TaskPool};
+use azart_gfx_utils::{shader_path};
+use bevy::asset::io::VecReader;
+use bevy::tasks::{block_on, ComputeTaskPool, ParallelSliceMut, TaskPool};
 use gpu_allocator::MemoryLocation;
 use std140::repr_std140;
 use crate::buffer::{Buffer, BufferCreateInfo};
@@ -157,8 +160,8 @@ impl Plugin for RenderPlugin {
 		app
 			.insert_resource(self.settings.clone())
 			.insert_resource(GpuContextHandle::new(context))
-			.add_systems(PreUpdate, create_swapchain_on_window_spawned)
-			.add_systems(PreUpdate, create_render_pass_on_primary_window_spawned);
+			.add_systems(PreUpdate, create_swapchain_on_window_spawned);
+			//.add_systems(PreUpdate, create_render_pass_on_primary_window_spawned);
 
 		// TMP
 		app
@@ -461,17 +464,19 @@ fn init(
 fn render(
 	context: Res<GpuContextHandle>,
 	time: Res<Time>,
-	mut base_pass: ResMut<BasePass>,
-	base_material: ResMut<BaseMaterial>,
-	model: Res<Model>,
-	indirect_args: Res<IndirectArgs>,
-	mut query: Query<&mut Swapchain>,
+	mut base_pass: Option<ResMut<BasePass>>,
+	base_material: Option<Res<BaseMaterial>>,
+	model: Option<Res<Model>>,
+	indirect_args: Option<Res<IndirectArgs>>,
+	mut query: Query<(&Window, &mut Swapchain)>,
 	settings: Res<RenderSettings>,
 ) {
-	let start = std::time::Instant::now();
-	
+	let (Some(mut base_pass), Some(base_material), Some(model), Some(indirect_args)) = (base_pass, base_material, model, indirect_args) else {
+		return;
+	};
+
 	unsafe {
-		for mut swapchain in query.iter_mut() {
+		for (window, mut swapchain) in query.iter_mut() {
 			let previous_frame_index = swapchain.current_frame_index;
 			
 			let (new_frame_index, new_image_index, suboptimal) = swapchain.acquire_next_image();
@@ -483,12 +488,26 @@ fn render(
 
 			// Update uniforms.
 			{
-				let model_matrix = Mat4::from_axis_angle(Vec3::new(1.0, 1.0, 0.0).normalize(), ((time.elapsed_secs() * 45.0) % 360.0).to_radians());
-				let mut perspective = Mat4::perspective_rh(45.0f32.to_radians(), swapchain.extent().x as f32 / swapchain.extent().y as f32, 0.1, 100.0);
-				perspective.y_axis.y *= -1.0;
+				let new_model = Mat4::from_rotation_y(((time.elapsed_secs() * 45.0) % 360.0).to_radians());
+				let mut new_proj = Mat4::perspective_rh(120_f32.to_radians(), window.width() / window.height(), 0.1, 100.0);
+				new_proj.y_axis.y *= -1.0;
+
+				let pre_rotation = match swapchain.current_transform() {
+					vk::SurfaceTransformFlagsKHR::ROTATE_90 => Mat4::from_rotation_z(90_f32.to_radians()),
+					vk::SurfaceTransformFlagsKHR::ROTATE_180 => Mat4::from_rotation_z(180_f32.to_radians()),
+					vk::SurfaceTransformFlagsKHR::ROTATE_270 => Mat4::from_rotation_z(270_f32.to_radians()),
+					_ => Mat4::IDENTITY,
+				};
+
+				new_proj = pre_rotation * new_proj;
+
 				let per_frame_view_matrices = unsafe { slice::from_raw_parts_mut(model.view_matrices_buffer.allocation.mapped_ptr().unwrap().as_ptr() as *mut ViewMatrices, settings.frames_in_flight) };
-				per_frame_view_matrices[new_frame_index.0].model = unsafe { mem::transmute_copy(&model_matrix) };
-				per_frame_view_matrices[new_frame_index.0].proj = unsafe { mem::transmute_copy(&perspective) };
+				let ViewMatrices { model, proj, .. } = &mut per_frame_view_matrices[new_frame_index.0];
+
+				unsafe {
+					*model = mem::transmute_copy(&new_model);
+					*proj = mem::transmute_copy(&new_proj);
+				}
 			}
 			
 			{
@@ -501,8 +520,6 @@ fn render(
 			let start = std::time::Instant::now();
 			
 			record(cmd, &context, &base_pass, &base_material, &swapchain, &model, &indirect_args, new_frame_index.0, new_image_index.0, &settings);
-
-			println!("Record time {}", start.elapsed().as_millis());
 			
 			// End recording.
 			context.device.end_command_buffer(cmd).unwrap();
@@ -518,8 +535,6 @@ fn render(
 			let start = std::time::Instant::now();
 
 			context.device.queue_submit(queue, slice::from_ref(&submit_info), previous_frame.in_flight_fence).unwrap();
-
-			println!("Submit time: {}", start.elapsed().as_millis());
 			
 			let image_indices = [new_image_index.0 as u32];
 			
@@ -532,13 +547,15 @@ fn render(
 
 			let result = context.extensions.swapchain.queue_present(queue, &present_info);
 			
-			println!("Present time: {}", start.elapsed().as_millis());
-			
 			assert_ne!(result, Err(vk::Result::SUBOPTIMAL_KHR));
 
 			// Conditionally recreate swapchain if required.
-			if suboptimal || matches!(result, /*Ok(true) |*/ Err(vk::Result::ERROR_OUT_OF_DATE_KHR)) {
-				info!("Swapchain is not optimal after present! Status: {:?}. Recreating...", (suboptimal, result));
+			if suboptimal || matches!(result, Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR)) {
+				info!("Swapchain is not optimal after present! Status: (suboptimal: {suboptimal}, result: {result:?}). Recreating...");
+
+				// Wait for the GPU to go idle before doing anything.
+				// @NOTE: This is very expensive...
+				context.wait_idle();
 				
 				swapchain.recreate(None, None);
 
@@ -546,8 +563,6 @@ fn render(
 			}
 		}
 	}
-	
-	println!("Render time: {}", start.elapsed().as_millis());
 }
 
 unsafe fn record(
@@ -562,109 +577,111 @@ unsafe fn record(
 	image_index: usize,
 	settings: &RenderSettings,
 ) {
-	// Begin render pass.
-	{
-		let attachment_count = match &base_pass.msaa_color_attachment {
-			Some(_) => 3,
-			None => 2,
-		};
-		
-		let clear_values = (0..attachment_count)
-			.map(|_| vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } })
-			.collect::<Vec<_>>();
-		
-		let UVec2 { x: width, y: height } = swapchain.extent();
-		
-		let begin_info = vk::RenderPassBeginInfo::default()
-			.render_pass(base_pass.render_pass)
-			.framebuffer(base_pass.frame_buffer)
-			.render_area(vk::Rect2D {
-				extent: vk::Extent2D {
-					width,
-					height,
-				},
-				..default()
-			})
-			.clear_values(&clear_values);
+	unsafe {
+		// Begin render pass.
+		{
+			let attachment_count = match &base_pass.msaa_color_attachment {
+				Some(_) => 3,
+				None => 2,
+			};
 
-		context.device.cmd_begin_render_pass(cmd, &begin_info, vk::SubpassContents::INLINE);
-	}
-	
-	// Set viewport
-	{
-		let UVec2 { x: width, y: height } = swapchain.extent();
-		
-		let viewports = [
-			vk::Viewport::default()
-				.width(width as f32)
-				.height(height as f32)
-				.min_depth(1.0)// Reverse-Z for better precision afar.
-				.max_depth(0.0),
-		];
-		
-		context.device.cmd_set_viewport(cmd, 0, &viewports);
-	}
+			let clear_values = (0..attachment_count)
+				.map(|_| vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } })
+				.collect::<Vec<_>>();
 
-	// Set scissor.
-	{
-		let UVec2 { x: width, y: height } = swapchain.extent();
+			let UVec2 { x: width, y: height } = swapchain.extent();
 
-		let scissors = [
-			vk::Rect2D::default()
-				.extent(vk::Extent2D {
-					width,
-					height,
-				}),
-		];
-		
-		context.device.cmd_set_scissor(cmd, 0, &scissors);
-	}
+			let begin_info = vk::RenderPassBeginInfo::default()
+				.render_pass(base_pass.render_pass)
+				.framebuffer(base_pass.frame_buffer)
+				.render_area(vk::Rect2D {
+					extent: vk::Extent2D {
+						width,
+						height,
+					},
+					..default()
+				})
+				.clear_values(&clear_values);
 
-	// Bind descriptor set.
-	context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.layout, 0, slice::from_ref(&base_material.descriptor_sets[frame_index]), &[]);
+			context.device.cmd_begin_render_pass(cmd, &begin_info, vk::SubpassContents::INLINE);
+		}
 
-	context.device.cmd_bind_index_buffer(cmd, model.index_buffer.handle, 0, vk::IndexType::UINT16);
-	context.device.cmd_bind_vertex_buffers(cmd, 0, &[model.vertex_buffer.handle], &[0]);
-	
-	context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.handle);
+		// Set viewport
+		{
+			let UVec2 { x: width, y: height } = swapchain.extent();
 
-	//context.device.cmd_draw_indexed(cmd, CUBE_INDICES.len() as u32, 2, 0, 0, 0);
-	//context.device.cmd_draw_indexed_indirect_count(cmd, indirect_args.args_buffer.handle, 0, indirect_args.count_buffer.handle, 0, 100, size_of::<vk::DrawIndexedIndirectCommand>() as u32);
+			let viewports = [
+				vk::Viewport::default()
+					.width(width as f32)
+					.height(height as f32)
+					.min_depth(1.0) // Reverse-Z for better precision afar.
+					.max_depth(0.0),
+			];
 
-	context.extensions.draw_indirect_count.cmd_draw_indexed_indirect_count(cmd, indirect_args.args_buffer.handle, 0, indirect_args.count_buffer.handle, 0, 3, size_of::<vk::DrawIndexedIndirectCommand>() as u32);
+			context.device.cmd_set_viewport(cmd, 0, &viewports);
+		}
 
-	// End render pass.
+		// Set scissor.
+		{
+			let UVec2 { x: width, y: height } = swapchain.extent();
 
-	{
-		context.device.cmd_end_render_pass(cmd);
-	}
+			let scissors = [
+				vk::Rect2D::default()
+					.extent(vk::Extent2D {
+						width,
+						height,
+					}),
+			];
 
-	// Copy image to swapchain.
-	{
-		let image = swapchain.images()[image_index].image;
+			context.device.cmd_set_scissor(cmd, 0, &scissors);
+		}
 
-		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 0..1, 0..1);
+		// Bind descriptor set.
+		context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.layout, 0, slice::from_ref(&base_material.descriptor_sets[frame_index]), &[]);
 
-		let regions = [
-			vk::ImageCopy::default()
-				.extent(vk::Extent3D::default()
-					.width(swapchain.extent().x)
-					.height(swapchain.extent().y)
-					.depth(1)
-				)
-				.src_subresource(vk::ImageSubresourceLayers::default()
-					.aspect_mask(vk::ImageAspectFlags::COLOR)
-					.layer_count(1)
-				)
-				.dst_subresource(vk::ImageSubresourceLayers::default()
-					.aspect_mask(vk::ImageAspectFlags::COLOR)
-					.layer_count(1)
-				)
-		];
+		context.device.cmd_bind_index_buffer(cmd, model.index_buffer.handle, 0, vk::IndexType::UINT16);
+		context.device.cmd_bind_vertex_buffers(cmd, 0, &[model.vertex_buffer.handle], &[0]);
 
-		context.device.cmd_copy_image(cmd, base_pass.color_attachment.handle, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
+		context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, base_material.pipeline.handle);
 
-		context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, 0..1, 0..1);
+		//context.device.cmd_draw_indexed(cmd, CUBE_INDICES.len() as u32, 2, 0, 0, 0);
+		//context.device.cmd_draw_indexed_indirect_count(cmd, indirect_args.args_buffer.handle, 0, indirect_args.count_buffer.handle, 0, 100, size_of::<vk::DrawIndexedIndirectCommand>() as u32);
+
+		context.extensions.draw_indirect_count.cmd_draw_indexed_indirect_count(cmd, indirect_args.args_buffer.handle, 0, indirect_args.count_buffer.handle, 0, 3, size_of::<vk::DrawIndexedIndirectCommand>() as u32);
+
+		// End render pass.
+
+		{
+			context.device.cmd_end_render_pass(cmd);
+		}
+
+		// Copy image to swapchain.
+		{
+			let image = swapchain.images()[image_index].image;
+
+			context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, 0..1, 0..1);
+
+			let regions = [
+				vk::ImageCopy::default()
+					.extent(vk::Extent3D::default()
+						.width(swapchain.extent().x)
+						.height(swapchain.extent().y)
+						.depth(1)
+					)
+					.src_subresource(vk::ImageSubresourceLayers::default()
+						.aspect_mask(vk::ImageAspectFlags::COLOR)
+						.layer_count(1)
+					)
+					.dst_subresource(vk::ImageSubresourceLayers::default()
+						.aspect_mask(vk::ImageAspectFlags::COLOR)
+						.layer_count(1)
+					)
+			];
+
+			context.device.cmd_copy_image(cmd, base_pass.color_attachment.handle, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
+
+			context.cmd_transition_image_layout(cmd, image, swapchain.format(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, 0..1, 0..1);
+		}
 	}
 }
 
@@ -672,15 +689,15 @@ fn create_render_pass_on_primary_window_spawned(
 	mut commands: Commands,
 	mut events: EventReader<WindowCreated>,
 	context: Res<GpuContextHandle>,
-	query: Query<&Window, With<PrimaryWindow>>,
+	query: Query<&Swapchain, With<PrimaryWindow>>,
 	settings: Res<RenderSettings>,
 ) {
 	for &WindowCreated { window: e } in events.read() {
-		let Ok(window) = query.get(e) else {
+		let Ok(swapchain) = query.get(e) else {
 			continue;
 		};
 
-		let base_pass = BasePass::new("base_pass".into(), Arc::clone(&context), window.resolution.physical_size(), settings.msaa);
+		let base_pass = BasePass::new("base_pass".into(), Arc::clone(&context), swapchain.extent(), settings.msaa);
 
 		let pipeline = {
 			let create_info = GraphicsPipelineCreateInfo {
@@ -709,13 +726,12 @@ fn create_render_pass_on_primary_window_spawned(
 		};
 
 		let texture = {
-			/*let path = asset_path("models/chom/chom_festive.jpg");
-			let image_data = image::ImageReader::open(&*path)
-				.unwrap_or_else(|e| panic!("Failed to read data path {path:?}. Error: {e}"))
-				.decode()
-				.expect("Failed to decode image {path:?}!");*/
+			let path = Path::new("assets/models/chom/chom_festive.jpg");
 
-			let image_data = image::load_from_memory(include_bytes!("../../../../assets/models/chom/chom_festive.jpg")).unwrap();
+			let image_data = {
+				let buffer = io::read(path).unwrap();
+				image::load_from_memory(&buffer).unwrap()
+			};
 
 			let create_info = ImageCreateInfo {
 				resolution: UVec2::new(image_data.width(), image_data.height()),
@@ -808,7 +824,7 @@ fn create_render_pass_on_primary_window_spawned(
 			let view_matrices = unsafe {
 				let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0));
 				let view = Mat4::look_at_rh(Vec3::new(5.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
-				let proj = Mat4::perspective_rh(45.0f32.to_radians(), window.resolution.physical_size().x as f32 / window.resolution.physical_size().y as f32, 0.1, 100.0);
+				let proj = Mat4::perspective_rh(45.0f32.to_radians(), swapchain.extent().x as f32 / swapchain.extent().y as f32, 0.1, 100.0);
 
 				let mut proj = proj.to_cols_array_2d();
 				proj[1][1] *= -1.0;
@@ -971,7 +987,7 @@ fn create_render_pass_on_primary_window_spawned(
 					for cmd in cmds {
 						*cmd = vk::DrawIndexedIndirectCommand {
 							index_count: CUBE_INDICES.len() as _,
-							instance_count: 1,
+							instance_count: 2,
 							first_index: 0,
 							vertex_offset: 0,
 							first_instance: 0,
@@ -988,7 +1004,7 @@ fn create_render_pass_on_primary_window_spawned(
 
 			context.upload_buffer(&count_buffer, |data| {
 				unsafe {
-					*(data.as_mut_ptr() as *mut u32) = 2;
+					*(data.as_mut_ptr() as *mut u32) = 3;
 				}
 			});
 
@@ -1017,6 +1033,7 @@ fn create_swapchain_on_window_spawned(
 	context: Res<GpuContextHandle>,
 	windows: NonSend<WinitWindows>,
 	query: Query<(Entity, &Window), Without<Swapchain>>,
+	primary_window_query: Query<(), With<PrimaryWindow>>,
 	settings: Res<RenderSettings>,
 ) {
 	for (e, window) in query.iter() {
@@ -1027,11 +1044,7 @@ fn create_swapchain_on_window_spawned(
 
 				match (window.display_handle(), window.window_handle()) {
 					(Ok(display_handle), Ok(window_handle)) => (display_handle, window_handle),
-					(display_handle_result, window_handle_result) => {
-						#[cfg(debug_assertions)]
-						info!("Failed to create swapchain! Display: {:?}, Window: {:?}\n", display_handle_result.map(|_| ()), window_handle_result.map(|_| ()));
-						continue;
-					},
+					_ => continue,// Failed to create swapchain. One of the handles is not valid yet. Rerun next frame.
 				}
 			};
 
@@ -1044,43 +1057,349 @@ fn create_swapchain_on_window_spawned(
 				..default()
 			};
 
-			println!("CREATING SWAPCHAIN FOR {e:?}");
-
 			Swapchain::new("swapchain".into(), Arc::clone(&context), display_handle, window_handle, &create_info)
 		};
 
-		println!("CREATED SWAPCHAIN FOR {e:?}");
+		if primary_window_query.contains(e) {
+			create_global_resources_on_primary_window_spawned(&mut commands, &context, &swapchain, &settings);
+		}
 
 		// Unfortunate archetype traversal. Should happen very rarely though.
 		commands.entity(e).insert(swapchain);
 	}
+}
 
-	//return;
-	/*for &WindowCreated { window: e } in events.read() {
-		// If this fails then there's already a swapchain associated with the entity.
-		let Ok(window) = query.get(e) else {
-			continue;
+fn create_global_resources_on_primary_window_spawned(
+	commands: &mut Commands,
+	context: &Arc<GpuContext>,
+	swapchain: &Swapchain,
+	settings: &RenderSettings,
+) {
+	let base_pass = BasePass::new("base_pass".into(), Arc::clone(&context), swapchain.extent(), settings.msaa);
+
+	let pipeline = {
+		let create_info = GraphicsPipelineCreateInfo {
+			vertex_shader: &shader_path("shader.vert"),
+			fragment_shader: &shader_path("shader.frag"),
+			vertex_inputs: &[
+				VertexInput {
+					stride: size_of::<Vertex>() as u32,
+					attributes: &[
+						VertexAttribute {
+							name: "pos",
+							offset: offset_of!(Vertex, pos) as u32,
+						},
+						VertexAttribute {
+							name: "uv",
+							offset: offset_of!(Vertex, uv) as u32,
+						},
+					]
+				},
+			],
+			msaa: settings.msaa,
+			fill_mode: TriangleFillMode::Fill,
 		};
 
-		let swapchain = {
-			let (display_handle, window_handle) = {
-				let window = windows.get_window(e).unwrap_or_else(|| panic!("Failed to get window for entity {e}!"));
-				(window.display_handle().expect("Failed to get the native display handle!"), window.window_handle().expect("Failed to get the native window handle!"))
-			};
-			
-			let create_info = SwapchainCreateInfo {
-				present_mode: window.present_mode,
-				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
-				image_count: settings.frames_in_flight as u32,
-				format: Some(vk::Format::R8G8B8A8_SRGB),
-				color_space: Some(vk::ColorSpaceKHR::SRGB_NONLINEAR),
-				..default()
-			};
-			
-			Swapchain::new("swapchain".into(), Arc::clone(&context), display_handle, window_handle, &create_info)
+		unsafe { GraphicsPipeline::new("base_material".into(), Arc::clone(&context), base_pass.render_pass, &create_info) }
+	};
+
+	let texture = {
+		let path = Path::new("assets/models/chom/chom_festive.jpg");
+
+		let image_data = {
+			let buffer = io::read(path).unwrap();
+			image::load_from_memory(&buffer).unwrap()
 		};
 
-		// Unfortunate archetype traversal. Should happen very rarely though.
-		commands.entity(e).insert(swapchain);
-	}*/
+		let create_info = ImageCreateInfo {
+			resolution: UVec2::new(image_data.width(), image_data.height()),
+			format: Format::RgbaU8Norm,
+			usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+			msaa: MsaaCount::None,
+			mip_count: MipCount::Max,
+			..default()
+		};
+
+		let image = Image::new("texture".into(), Arc::clone(&context), &create_info);
+
+		context.upload_image(&image, None, |mips| {
+			// Create first mip.
+			image_data
+				.pixels()
+				.zip(mips[0].chunks_exact_mut(4))
+				.for_each(|((_, _, image::Rgba(rgba)), data)| data.copy_from_slice(&rgba));
+
+			// Generate subsequent mips.
+			for mip in 1..mips.len() {
+				let ([.., src], [dst, ..]) = mips.split_at_mut(mip) else {
+					unreachable!();
+				};
+
+				let prev_mip = mip - 1;
+
+				let width = (image.resolution.x as usize >> mip).max(1);
+				let prev_width = (image.resolution.x as usize >> prev_mip).max(1);
+				dst.par_chunk_map_mut(ComputeTaskPool::get(), 4, |i, data| {
+					let (x, y) = (i % width, i / width);
+					let mut aggregate = [0; 4];
+					let mut add = |offset_x, offset_y| {
+						let i = ((x * 2 + offset_x) + (y * 2 + offset_y) * prev_width) * 4;
+						aggregate
+							.iter_mut()
+							.zip(src[i..i + 4].iter())
+							.for_each(|(dst, src)| *dst += *src as u32);
+					};
+
+					add(0, 0);
+					add(1, 0);
+					add(0, 1);
+					add(1, 1);
+
+					data
+						.iter_mut()
+						.zip(aggregate.iter())
+						.for_each(|(dst, &src)| *dst = (src / 4) as u8);
+				});
+			}
+		});
+
+		image
+	};
+
+	let index_buffer = {
+		let create_info = BufferCreateInfo {
+			size: size_of_val(&CUBE_INDICES),
+			usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			memory: MemoryLocation::GpuOnly,
+		};
+
+		let buffer = Buffer::new("index_buffer".into(), Arc::clone(&context), &create_info);
+
+		context.upload_buffer(&buffer, |data| {
+			unsafe { std::ptr::copy_nonoverlapping(CUBE_INDICES.as_ptr(), data.as_mut_ptr() as *mut _, CUBE_INDICES.len()); }
+		});
+
+		buffer
+	};
+
+	let vertex_buffer = {
+		let create_info = BufferCreateInfo {
+			size: size_of_val(&CUBE_VERTICES),
+			usage: vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			memory: MemoryLocation::GpuOnly,
+		};
+
+		let buffer = Buffer::new("vertex_buffer".into(), Arc::clone(&context), &create_info);
+
+		context.upload_buffer(&buffer, |data| {
+			unsafe { std::ptr::copy_nonoverlapping(CUBE_VERTICES.as_ptr(), data.as_mut_ptr() as *mut _, CUBE_VERTICES.len()); }
+		});
+
+		buffer
+	};
+
+	let view_matrices_buffer = {
+		let view_matrices = unsafe {
+			let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0));
+			let view = Mat4::look_at_rh(Vec3::new(5.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
+			let proj = Mat4::perspective_rh(45.0f32.to_radians(), swapchain.extent().x as f32 / swapchain.extent().y as f32, 0.1, 100.0);
+
+			let mut proj = proj.to_cols_array_2d();
+			proj[1][1] *= -1.0;
+
+			let proj = Mat4::from_cols_array_2d(&proj);
+
+			ViewMatrices {
+				model: mem::transmute_copy(&model),
+				view: mem::transmute_copy(&view),
+				proj: mem::transmute_copy(&proj),
+			}
+		};
+
+		let create_info = BufferCreateInfo {
+			size: size_of::<ViewMatrices>() * settings.frames_in_flight,
+			usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			memory: MemoryLocation::CpuToGpu,
+		};
+
+		let buffer = Buffer::new("view_matrices_buffer".into(), Arc::clone(&context), &create_info);
+
+		let mapped_slice = unsafe { slice::from_raw_parts_mut(buffer.allocation.mapped_ptr().unwrap().as_ptr() as *mut _, settings.frames_in_flight) };
+		for value in mapped_slice.iter_mut() {
+			*value = view_matrices;
+		}
+
+		buffer
+	};
+
+	let descriptor_pool = {
+		let pool_sizes = [
+			vk::DescriptorPoolSize::default()
+				.ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+				.descriptor_count(/*settings.frames_in_flight as u32*/1000),
+		];
+
+		let create_info = vk::DescriptorPoolCreateInfo::default()
+			.max_sets(settings.frames_in_flight as u32)
+			.pool_sizes(&pool_sizes);
+
+		unsafe { context.device.create_descriptor_pool(&create_info, None) }.unwrap()
+	};
+
+	let descriptor_sets = {
+		assert_eq!(pipeline.descriptor_set_layouts.len(), 1);
+
+		let set_layouts = (0..settings.frames_in_flight)
+			.flat_map(|_| pipeline.descriptor_set_layouts.iter().copied())
+			.collect::<Vec<_>>();
+
+		println!("SET_LAYOUT_COUNT: {}", set_layouts.len());
+
+		let allocate_info = vk::DescriptorSetAllocateInfo::default()
+			.descriptor_pool(descriptor_pool)
+			.set_layouts(&set_layouts);
+
+		let descriptor_sets = unsafe { context.device.allocate_descriptor_sets(&allocate_info) }
+			.unwrap_or_else(|e| panic!("Failed to allocate descriptor sets! {} frames in flight!: {e}", settings.frames_in_flight));
+
+		let sampler = {
+			let create_info = vk::SamplerCreateInfo::default()
+				.mag_filter(vk::Filter::LINEAR) // Smooth magnification
+				.min_filter(vk::Filter::LINEAR) // Smooth minification
+				.mipmap_mode(vk::SamplerMipmapMode::LINEAR) // Trilinear filtering
+				.address_mode_u(vk::SamplerAddressMode::REPEAT) // Wrap in U direction
+				.address_mode_v(vk::SamplerAddressMode::REPEAT) // Wrap in V direction
+				.address_mode_w(vk::SamplerAddressMode::REPEAT) // Wrap in W direction
+				.mip_lod_bias(0.0) // No LOD bias
+				.anisotropy_enable(false) // Enable anisotropic filtering
+				.max_anisotropy(16.0) // Use max anisotropy (ensure device supports it)
+				.compare_enable(false) // No depth comparison
+				.min_lod(0.0) // Minimum mip level
+				.max_lod(vk::LOD_CLAMP_NONE)
+				.border_color(vk::BorderColor::FLOAT_OPAQUE_BLACK) // Border color (only for CLAMP modes)
+				.unnormalized_coordinates(false); // Use normalized texture coordinates
+
+			unsafe { context.device.create_sampler(&create_info, None) }.unwrap()
+		};
+
+		let image_info = vk::DescriptorImageInfo::default()
+			.sampler(sampler)
+			.image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+			.image_view(texture.view);
+
+		/*let view_matrices_writes = [
+			vk::DescriptorBufferInfo::default()
+				.buffer(view_matrices_buffer.handle)
+				.offset(0)
+				.range(view_matrices_buffer.size() as vk::DeviceSize),
+		];
+
+		let descriptor_writes = [
+			vk::WriteDescriptorSet::default()
+				.dst_set(descriptor_sets)
+				.dst_binding(0)
+				.descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+				.buffer_info(&view_matrices_writes),
+			vk::WriteDescriptorSet::default()
+				.dst_set(descriptor_sets)
+				.dst_binding(1)
+				.descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+				.image_info(slice::from_ref(&image_info))
+		];*/
+
+		let view_matrices_buffer_info = (0..settings.frames_in_flight)
+			.map(|i| vk::DescriptorBufferInfo::default()
+				.buffer(view_matrices_buffer.handle)
+				.offset((i * size_of::<ViewMatrices>()) as _)
+				.range(size_of::<ViewMatrices>() as _)
+			)
+			.collect::<Vec<_>>();
+
+		let descriptor_writes = descriptor_sets
+			.iter()
+			.zip(view_matrices_buffer_info.iter())
+			.flat_map(|(&descriptor_set, view_matrices_buffer_info)| [
+				vk::WriteDescriptorSet::default()
+					.dst_set(descriptor_set)
+					.dst_binding(0)
+					.descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+					.buffer_info(slice::from_ref(&view_matrices_buffer_info)),
+				vk::WriteDescriptorSet::default()
+					.dst_set(descriptor_set)
+					.dst_binding(1)
+					.descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+					.image_info(slice::from_ref(&image_info))
+			]
+			)
+			.collect::<Vec<_>>();
+
+		unsafe { context.device.update_descriptor_sets(&descriptor_writes, &[]); }
+
+		descriptor_sets
+	};
+
+	#[cfg(debug_assertions)]
+	unsafe {
+		context.set_debug_name("base_material_descriptor_pool", descriptor_pool);
+		for (i, &descriptor_set) in descriptor_sets.iter().enumerate() {
+			context.set_debug_name(format!("{}_descriptor_set[{i}]", base_pass.name).as_str(), descriptor_set);
+		}
+	}
+
+	let base_material = BaseMaterial {
+		pipeline,
+		descriptor_pool,
+		descriptor_sets,
+	};
+
+	let indirect_args = {
+		let args_buffer = Buffer::new("args_buffer".into(), Arc::clone(&context), &BufferCreateInfo {
+			size: size_of::<vk::DrawIndexedIndirectCommand>() * 3,
+			usage: vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			memory: MemoryLocation::GpuOnly,
+		});
+
+		context.upload_buffer(&args_buffer, |data| {
+			unsafe {
+				let cmds = slice::from_raw_parts_mut(data.as_mut_ptr() as *mut _, 3);
+				for cmd in cmds {
+					*cmd = vk::DrawIndexedIndirectCommand {
+						index_count: CUBE_INDICES.len() as _,
+						instance_count: 2,
+						first_index: 0,
+						vertex_offset: 0,
+						first_instance: 0,
+					};
+				}
+			}
+		});
+
+		let count_buffer = Buffer::new("count_buffer".into(), Arc::clone(&context), &BufferCreateInfo {
+			size: size_of::<u32>(),
+			usage: vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			memory: MemoryLocation::GpuOnly,
+		});
+
+		context.upload_buffer(&count_buffer, |data| {
+			unsafe {
+				*(data.as_mut_ptr() as *mut u32) = 3;
+			}
+		});
+
+		IndirectArgs {
+			args_buffer,
+			count_buffer,
+		}
+	};
+
+	commands.insert_resource(base_pass);
+	commands.insert_resource(base_material);
+	commands.insert_resource(Texture(texture));
+	commands.insert_resource(Model {
+		name: "cube".into(),
+		index_buffer,
+		vertex_buffer,
+		view_matrices_buffer,
+	});
+	commands.insert_resource(indirect_args);
 }

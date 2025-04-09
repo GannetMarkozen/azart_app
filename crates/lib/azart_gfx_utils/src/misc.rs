@@ -348,31 +348,14 @@ impl From<PathBuf> for AssetPath {
 #[must_use]
 pub fn shader_path(path: impl AsRef<Path>) -> ShaderPath {
 	let path = path.as_ref();
+	let mut shader_path = Path::new("assets/spv/").join(path);
 
-	let asset_path_root = match Path::new("assets/").exists() {
-		true => Path::new("assets/"),
-		false => Path::new("../../assets/"),
-	};
-
-	let mut shader_path = asset_path_root.join("spv/").join(path);
 	match path.extension() {
 		Some(ext) => _ = shader_path.set_extension(format!("{}.ron", ext.to_str().unwrap())),
 		None => _ = shader_path.set_extension("ron"),
 	}
 
 	ShaderPath(shader_path)
-}
-
-#[must_use]
-pub fn asset_path(path: impl AsRef<Path>) -> AssetPath {
-	let asset_path_root = match Path::new("assets/").exists() {
-		true => Path::new("assets/"),
-		false => Path::new("../../assets/"),
-	};
-
-	let asset_path = asset_path_root.join(path.as_ref());
-
-	AssetPath(asset_path)
 }
 
 #[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Reflect, Resource)]

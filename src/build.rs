@@ -2,9 +2,13 @@ use std::path::Path;
 use std::env;
 
 fn main() {
-	return;
 	println!("cargo:rerun-if-changed=build.rs");
 	println!("cargo:rerun-if-changed=assets");
+
+	// This is not necessary for Android. Asset packaging is handled by XBuild.
+	if matches!(env::var("TARGET"), Ok(target) if target.contains("android")) {
+		return;
+	}
 
 	color_eyre::install().unwrap();
 	unsafe { env::set_var("RUST_BACKTRACE", "full"); }
@@ -36,17 +40,4 @@ fn main() {
 		std::fs::copy(entry.path(), &new_path).unwrap_or_else(|e| panic!("Failed to copy data to dir {new_path:?}: {e}"));
 		println!("Copied contents of {entry:?} to {new_path:?}!");
 	}
-	panic!("yeah, that just happened.");
-
-	// Package assets with build.
-
-	// Nothing special required if not packaging for android.
-	/*if !matches!(std::env::var("TARGET"), Ok(target) if target.contains("android")) {
-		return;
-	};
-
-	let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-	let assets_dst = Path::new(&manifest_dir);*/
-
-	//panic!("asset_dst: {assets_dst:?}");
 }
