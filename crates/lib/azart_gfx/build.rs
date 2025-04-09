@@ -24,8 +24,6 @@ fn main() {
 	assert!(Path::new(SHADER_DIR).exists(), "shader directory \"{SHADER_DIR}\" does not exist!");
 	println!("cargo:rerun-if-changed={}", SHADER_DIR);
 
-	let release_build = matches!(env::var("PROFILE"), Ok(profile) if profile == "release");
-
 	let compiler = shaderc::Compiler::new().unwrap();
 
 	let mut compile_errs = vec![];
