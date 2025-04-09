@@ -1,0 +1,13 @@
+[package]
+name = "azart"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+azart_utils = { path = "../azart_utils" }
+azart_gfx = { path = "../azart_gfx", optional = true }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+
+[features]
+default = ["gfx"]
+gfx = ["azart_gfx"] # Headless applications should disable this feature.

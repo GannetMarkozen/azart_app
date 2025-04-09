@@ -1,0 +1,10 @@
+[package]
+name = "azart_gfx_utils"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+serde = { version = "*", features = ["derive"] }
+ash = "*"
+project-root = "0.2.2"

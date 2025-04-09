@@ -1,0 +1,38 @@
+[package]
+name = "azart_gfx"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+azart_gfx_utils = { path = "../azart_gfx_utils" }
+azart_utils = { path = "../azart_utils" }
+ash = "0.38.0"
+ash-window = "0.13.0"
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+winit = "0.30.9"
+gpu-allocator = "0.27.0"
+thiserror = "2.0.12"
+bytemuck = "1.22.0"
+bitflags = "2.9.0"
+image = "0.25.5"
+derivative = "2.2.0"
+spirv_headers = "1.5.0"
+serde = { version = "1.0.219", features = ["derive"] }
+ron = "0.9.0"
+std140 = "0.2.6"
+vk-sync = { path = "../vk-sync-rs" }
+walkdir = "2.5.0"
+
+[build-dependencies]
+azart_utils = { path = "../azart_utils" }
+azart_gfx_utils = { path = "../azart_gfx_utils" }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+color-eyre = "0.6.3"
+spirv-reflect = "0.2.3"
+spirv_headers = "1.5.0"
+serde = { version = "1.0.219", features = ["derive"] }
+glsl = "7.0.0"
+shaderc = "0.9.1"
+walkdir = "2.5.0"
+ron = "0.9.0"
