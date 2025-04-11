@@ -9,7 +9,7 @@ azart_gfx_utils = { path = "../azart_gfx_utils" }
 azart_utils = { path = "../azart_utils" }
 ash = "0.38.0"
 ash-window = "0.13.0"
-bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "bevy_state", "multi_threaded"] }
 winit = "0.30.9"
 gpu-allocator = "0.27.0"
 thiserror = "2.0.12"
@@ -23,11 +23,12 @@ ron = "0.9.0"
 std140 = "0.2.6"
 vk-sync = { path = "../vk-sync-rs" }
 walkdir = "2.5.0"
+openxr = { version = "0.19.0", features = ["mint", "static"] }
 
 [build-dependencies]
 azart_utils = { path = "../azart_utils" }
 azart_gfx_utils = { path = "../azart_gfx_utils" }
-bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "bevy_state", "multi_threaded"] }
 color-eyre = "0.6.3"
 spirv-reflect = "0.2.3"
 spirv_headers = "1.5.0"

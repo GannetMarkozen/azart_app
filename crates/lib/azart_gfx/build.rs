@@ -200,6 +200,10 @@ fn main() {
 				.unwrap_or_else(|| "ron".to_owned())
 			);
 
+		if let Some(dir) = path.parent() {
+			std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("Failed to create dir {dir:?}: {e}"));
+		}
+
 		let mut file = match std::fs::File::create(&path) {
 			Ok(f) => f,
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => panic!("Could not find path {path:?} for writing!"),

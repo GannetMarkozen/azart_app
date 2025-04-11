@@ -3,6 +3,7 @@ use bevy::diagnostic::{DiagnosticsPlugin, FrameTimeDiagnosticsPlugin, LogDiagnos
 use bevy::input::InputPlugin;
 use bevy::log::LogPlugin;
 use bevy::MinimalPlugins;
+use bevy::state::app::StatesPlugin;
 use bevy::window::{PresentMode, WindowMode};
 use bevy::winit::{WakeUp, WinitPlugin};
 
@@ -12,12 +13,13 @@ impl Plugin for AzartPlugin {
 	fn build(&self, app: &mut App) {
 		app
 			.add_plugins(MinimalPlugins)
+			.add_plugins(StatesPlugin::default())
 			.add_plugins(AssetPlugin::default())
 			.add_plugins(InputPlugin::default())
 			.add_plugins(WindowPlugin {
 				primary_window: Some(Window {
 					title: "azart".to_owned(),
-					present_mode: PresentMode::Fifo,
+					present_mode: PresentMode::Immediate,
 					focused: true,
 					..default()
 				}),

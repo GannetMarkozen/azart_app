@@ -15,3 +15,10 @@ impl Default for RenderSettings {
 		}
 	}
 }
+
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Hash, Reflect, States)]
+pub enum DisplayMode {
+	#[default]
+	Standard,
+	Xr,
+}

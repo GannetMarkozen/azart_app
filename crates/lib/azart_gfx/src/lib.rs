@@ -11,6 +11,7 @@ mod graphics_pipeline;
 mod buffer;
 mod render_settings;
 mod descriptor_set;
+pub mod xr;
 
 pub use context::*;
 pub use image::*;

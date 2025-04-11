@@ -8,6 +8,7 @@ use std::any::TypeId;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use ash::vk;
+use ash::vk::Handle;
 use bevy::log::{error, info, warn};
 use bevy::math::UVec2;
 use bevy::prelude::{FromReflect, PartialReflect, Resource};
@@ -27,6 +28,7 @@ use bevy::reflect::serde::{ReflectDeserializer, TypedReflectDeserializer};
 use bevy::reflect::TypeRegistry;
 use serde::de::DeserializeSeed;
 use vk_sync::*;
+use crate::xr::XrInstance;
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
@@ -36,6 +38,7 @@ pub struct GpuContext {
 	pub queue_families: QueueFamilies,
 	pub extensions: Extensions,
 	pub capabilities: Capabilities,
+	pub xr: Option<XrInstance>,// Only valid if running with OpenXR (not necessarily playing with VR).
 	pub(crate) allocator: ManuallyDrop<Mutex<Allocator>>,
 }
 
@@ -69,7 +72,7 @@ impl GpuContext {
 		//ash::khr::fragment_shading_rate::NAME,
 	];
 
-	pub fn new(extensions: &[&CStr]) -> Self {
+	pub fn new(extensions: &[&CStr], xr: Option<XrInstance>) -> Self {
 		unsafe {
 			let entry = ash::Entry::load().expect("failed to create entry point for vulkan!");
 			let instance = {
@@ -125,8 +128,10 @@ impl GpuContext {
 						.collect::<Vec<_>>()
 				};
 
+				const API_VERSION: u32 = vk::make_api_version(0, 1, 1, 0);
+
 				let app_info = vk::ApplicationInfo::default()
-					.api_version(vk::make_api_version(0, 1, 1, 0))
+					.api_version(API_VERSION)
 					.application_name(c"azart game")
 					.engine_name(c"azart engine")
 					.engine_version(vk::make_api_version(0, 1, 0, 0));
@@ -136,25 +141,50 @@ impl GpuContext {
 					.enabled_extension_names(&extensions)
 					.application_info(&app_info);
 
-				entry.create_instance(&create_info, None).expect("failed to create vulkan instance!")
+				match &xr {
+					Some(xr) => {
+						#[cfg(debug_assertions)]
+						{
+							const XR_API_VERSION: openxr::Version = openxr::Version::new(1, 0, 0);
+							let requirements = xr.instance.graphics_requirements::<openxr::Vulkan>(xr.hmd).expect("Failed to get OpenXR graphics requirements for Vulkan!");
+
+							assert!(XR_API_VERSION >= requirements.min_api_version_supported, "API version {:?} is less than min API version supported {:?} for OpenXR!", XR_API_VERSION, requirements.min_api_version_supported);
+							assert!(XR_API_VERSION <= requirements.max_api_version_supported, "API version {:?} is greater than max API version supported {:?} for OpenXR!", XR_API_VERSION, requirements.max_api_version_supported);
+						}
+
+						let instance = xr.instance.create_vulkan_instance(
+							xr.hmd,
+							mem::transmute(entry.static_fn().get_instance_proc_addr),
+							&create_info as *const _ as *const _,
+						).unwrap().unwrap();
+
+						ash::Instance::load(&entry.static_fn(), vk::Instance::from_raw(instance as _))
+					}
+					None => entry.create_instance(&create_info, None).expect("Failed to create Vulkan instance!")
+				}
 			};
 
-			let (physical_device, queue_families) = {
-				let physical_devices = instance.enumerate_physical_devices().unwrap();
-				let props = physical_devices
-					.iter()
-					.map(|&x| instance.get_physical_device_properties(x))
-					.collect::<Vec<_>>();
+			let physical_device = match &xr {
+				Some(xr) => {
+					let physical_device = xr.instance.vulkan_graphics_device(
+						xr.hmd,
+						instance.handle().as_raw() as *const _,
+					).unwrap();
 
-				let result = props
-					.iter()
-					.enumerate()
-					.filter(|&(_, x)| x.api_version >= vk::make_api_version(0, 1, 1, 0) && matches!(x.device_type, vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU))
-					.max_by(|&(_, a), (_, b)| a.device_type.cmp(&b.device_type))
-					.expect("failed to find a suitable physical device!")
-					.0;
+					vk::PhysicalDevice::from_raw(physical_device as _)
+				},
+				None => instance
+					.enumerate_physical_devices()
+					.unwrap()
+					.into_iter()
+					.map(|physical_device| (instance.get_physical_device_properties(physical_device), physical_device))
+					.filter(|&(x, _)| x.api_version >= vk::make_api_version(0, 1, 1, 0) && matches!(x.device_type, vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU))
+					.max_by(|&(a, _), &(b, _)| a.device_type.cmp(&b.device_type))
+					.map(|(_, x)| x)
+					.expect("Failed to find a suitable physical device!")
+			};
 
-				let physical_device = physical_devices[result];
+			let queue_families = {
 				let queue_family_props = instance.get_physical_device_queue_family_properties(physical_device);
 
 				let select_queue_family = |flags: vk::QueueFlags| {
@@ -167,13 +197,11 @@ impl GpuContext {
 						.0 as u32
 				};
 				
-				let queue_families = QueueFamilies {
+				QueueFamilies {
 					graphics: select_queue_family(vk::QueueFlags::GRAPHICS),
 					compute: select_queue_family(vk::QueueFlags::COMPUTE),
 					transfer: select_queue_family(vk::QueueFlags::TRANSFER),
-				};
-
-				(physical_device, queue_families)
+				}
 			};
 
 			let device = {
@@ -243,7 +271,19 @@ impl GpuContext {
 					.enabled_features(&features)
 					.push_next(&mut buffer_device_address_features);
 
-				instance.create_device(physical_device, &create_info, None).expect("failed to create logical device!")
+				match &xr {
+					Some(xr) => {
+						let device = xr.instance.create_vulkan_device(
+							xr.hmd,
+							mem::transmute(entry.static_fn().get_instance_proc_addr),
+							physical_device.as_raw() as _,
+							&create_info as *const _ as *const _,
+						).unwrap().unwrap();
+
+						ash::Device::load(&instance.fp_v1_0(), vk::Device::from_raw(device as _))
+					},
+					None => instance.create_device(physical_device, &create_info, None).expect("Failed to create logical device!"),
+				}
 			};
 			
 			let extensions = Extensions {
@@ -301,6 +341,7 @@ impl GpuContext {
 				queue_families,
 				extensions,
 				capabilities,
+				xr,
 				allocator: ManuallyDrop::new(Mutex::new(allocator)),
 			}
 		}

@@ -3,9 +3,11 @@ use azart_utils::debug_string::DebugString;
 use std::sync::Arc;
 use bevy::prelude::*;
 use ash::vk;
+use openxr as xr;
 use bevy::window::PresentMode;
 use winit::raw_window_handle::{DisplayHandle, WindowHandle};
 use crate::context::GpuContext;
+use crate::render_settings::DisplayMode;
 
 // Represents everything required to submit commands and render to a surface.
 #[derive(Component)]
@@ -457,6 +459,7 @@ pub struct SwapchainCreateInfo {
 	pub format: Option<vk::Format>,
 	pub color_space: Option<vk::ColorSpaceKHR>,
 	pub usage: vk::ImageUsageFlags,
+	pub display_mode: Option<DisplayMode>,// If None, will be selected by whether OpenXR is active or not.
 }
 
 impl Default for SwapchainCreateInfo {
@@ -468,6 +471,7 @@ impl Default for SwapchainCreateInfo {
 			format: None,
 			color_space: None,
 			usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+			display_mode: None,
 		}
 	}
 }
@@ -501,4 +505,19 @@ pub struct FrameState {
 pub struct SwapchainImage {
 	pub image: vk::Image,
 	pub image_view: vk::ImageView,
+}
+
+enum SwapchainState<'a> {
+	Standard(SwapchainStandardState),
+	Xr(SwapchainXrState<'a>),
+}
+
+struct SwapchainStandardState {
+	handle: vk::SwapchainKHR,
+	images: Box<[vk::Image]>,
+}
+
+struct SwapchainXrState<'a> {
+	handle: xr::Swapchain<xr::Vulkan>,
+	images: Box<[xr::SwapchainSubImage<'a, xr::Vulkan>]>,
 }

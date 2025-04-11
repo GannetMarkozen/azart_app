@@ -27,9 +27,8 @@ use bevy::tasks::{block_on, ComputeTaskPool, ParallelSliceMut, TaskPool};
 use gpu_allocator::MemoryLocation;
 use std140::repr_std140;
 use crate::buffer::{Buffer, BufferCreateInfo};
-use crate::render_settings::RenderSettings;
-
-
+use crate::render_settings::*;
+use crate::xr::{XrInstance, XrSession};
 /*#[repr_std140]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Vertex {
@@ -139,9 +138,19 @@ pub const CUBE_INDICES: [u16; 36] = [
 ];
 
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct RenderPlugin {
 	pub settings: RenderSettings,
+	pub display_mode: DisplayMode,
+}
+
+impl Default for RenderPlugin {
+	fn default() -> Self {
+		Self {
+			settings: default(),
+			display_mode: DisplayMode::Standard,
+		}
+	}
 }
 
 impl Plugin for RenderPlugin {
@@ -154,12 +163,20 @@ impl Plugin for RenderPlugin {
 			.iter()
 			.map(|&x| unsafe { CStr::from_ptr(x) })
 			.collect::<Vec<_>>();
-		
-		let context = Arc::new(GpuContext::new(&extensions));
+
+		let xr_instance = (self.display_mode == DisplayMode::Xr).then(|| XrInstance::new());
+		let context = GpuContext::new(&extensions, xr_instance);
+
+		// @NOTE: This should really only be launched when you want to play in VR.
+		if let Ok(session) = XrSession::new(&context) {
+			app.insert_resource(session);
+		}
 
 		app
+			.insert_resource(GpuContextHandle::new(Arc::new(context)))
+			.insert_state(self.display_mode)
 			.insert_resource(self.settings.clone())
-			.insert_resource(GpuContextHandle::new(context))
+			.insert_state(self.display_mode)
 			.add_systems(PreUpdate, create_swapchain_on_window_spawned);
 			//.add_systems(PreUpdate, create_render_pass_on_primary_window_spawned);
 
@@ -171,7 +188,7 @@ impl Plugin for RenderPlugin {
 		app
 			.add_systems(Update, |query: Query<&Window, With<PrimaryWindow>>, mut events: EventReader<WindowEvent>| {
 				for event in events.read() {
-					println!("WINDOW_EVENT: {event:?}");
+					//println!("WINDOW_EVENT: {event:?}");
 				}
 			});
 	}
@@ -1035,6 +1052,7 @@ fn create_swapchain_on_window_spawned(
 	query: Query<(Entity, &Window), Without<Swapchain>>,
 	primary_window_query: Query<(), With<PrimaryWindow>>,
 	settings: Res<RenderSettings>,
+	state: Res<State<DisplayMode>>,
 ) {
 	for (e, window) in query.iter() {
 		let swapchain = {
