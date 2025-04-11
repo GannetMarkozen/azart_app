@@ -148,7 +148,7 @@ impl Default for RenderPlugin {
 	fn default() -> Self {
 		Self {
 			settings: default(),
-			display_mode: DisplayMode::Standard,
+			display_mode: DisplayMode::Xr,
 		}
 	}
 }
@@ -164,8 +164,8 @@ impl Plugin for RenderPlugin {
 			.map(|&x| unsafe { CStr::from_ptr(x) })
 			.collect::<Vec<_>>();
 
-		let xr_instance = (self.display_mode == DisplayMode::Xr).then(|| XrInstance::new());
-		let context = GpuContext::new(&extensions, xr_instance);
+		let xr = (self.display_mode == DisplayMode::Xr).then(|| XrInstance::new());
+		let context = GpuContext::new(&extensions, xr);
 
 		// @NOTE: This should really only be launched when you want to play in VR.
 		if let Ok(session) = XrSession::new(&context) {
@@ -1069,7 +1069,7 @@ fn create_swapchain_on_window_spawned(
 			let create_info = SwapchainCreateInfo {
 				present_mode: window.present_mode,
 				usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
-				image_count: settings.frames_in_flight as u32,
+				min_image_count: settings.frames_in_flight as u32,
 				format: Some(vk::Format::R8G8B8A8_SRGB),
 				color_space: Some(vk::ColorSpaceKHR::SRGB_NONLINEAR),
 				..default()

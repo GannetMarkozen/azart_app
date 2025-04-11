@@ -19,7 +19,7 @@ impl Plugin for AzartPlugin {
 			.add_plugins(WindowPlugin {
 				primary_window: Some(Window {
 					title: "azart".to_owned(),
-					present_mode: PresentMode::Immediate,
+					present_mode: PresentMode::Fifo,
 					focused: true,
 					..default()
 				}),

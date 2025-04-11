@@ -12,6 +12,7 @@ mod buffer;
 mod render_settings;
 mod descriptor_set;
 pub mod xr;
+mod xr_swapchain;
 
 pub use context::*;
 pub use image::*;

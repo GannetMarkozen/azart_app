@@ -75,11 +75,11 @@ impl Swapchain {
 		};
 
 		let swapchain = {
-			assert!(create_info.image_count > 0, "Image count must be greater than 0!");
+			assert!(create_info.min_image_count > 0, "Image count must be greater than 0!");
 
 			let create_info = vk::SwapchainCreateInfoKHR::default()
 				.surface(surface)
-				.min_image_count(create_info.image_count)
+				.min_image_count(create_info.min_image_count)
 				.image_format(format)
 				.image_color_space(color_space)
 				.image_extent(vk::Extent2D {
@@ -101,7 +101,7 @@ impl Swapchain {
 			unsafe { context.extensions.swapchain.create_swapchain(&create_info, None) }.unwrap()
 		};
 		
-		let frames = (0..create_info.image_count)
+		let frames = (0..create_info.min_image_count)
 			.map(|i| {
 				let graphics_command_pool = {
 					let create_info = vk::CommandPoolCreateInfo::default()
@@ -454,7 +454,7 @@ impl Drop for Swapchain {
 
 pub struct SwapchainCreateInfo {
 	pub extent: Option<UVec2>,
-	pub image_count: u32,
+	pub min_image_count: u32,
 	pub present_mode: PresentMode,
 	pub format: Option<vk::Format>,
 	pub color_space: Option<vk::ColorSpaceKHR>,
@@ -466,7 +466,7 @@ impl Default for SwapchainCreateInfo {
 	fn default() -> Self {
 		Self {
 			extent: None,
-			image_count: 2,
+			min_image_count: 2,
 			present_mode: PresentMode::Fifo,
 			format: None,
 			color_space: None,
@@ -507,17 +507,20 @@ pub struct SwapchainImage {
 	pub image_view: vk::ImageView,
 }
 
-enum SwapchainState<'a> {
+enum SwapchainState {
 	Standard(SwapchainStandardState),
-	Xr(SwapchainXrState<'a>),
+	Xr(SwapchainXrState),
 }
 
 struct SwapchainStandardState {
 	handle: vk::SwapchainKHR,
-	images: Box<[vk::Image]>,
+	surface: vk::SurfaceKHR,
+	images: Box<[SwapchainImage]>,
+	frames: Box<[FrameState]>,
 }
 
-struct SwapchainXrState<'a> {
+struct SwapchainXrState {
 	handle: xr::Swapchain<xr::Vulkan>,
-	images: Box<[xr::SwapchainSubImage<'a, xr::Vulkan>]>,
+	session: xr::Session<xr::Vulkan>,
+	images: Box<[xr::SwapchainSubImage<'static, xr::Vulkan>]>,
 }

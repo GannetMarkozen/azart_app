@@ -11,10 +11,14 @@ pub struct XrInstance {
 
 impl XrInstance {
 	pub fn new() -> Self {
+		#[cfg(target_os = "windows")]
 		let entry = unsafe { xr::Entry::load() }.unwrap_or_else(|e| {
 			info!("Failed to load OpenXR entry! OpenXR SDK not found: {e}");
 			xr::Entry::linked()
 		});
+
+		#[cfg(not(target_os = "windows"))]
+		let entry = unsafe { xr::Entry::load() }.expect("Failed to load OpenXR entry!");
 
 		#[cfg(target_os = "android")]
 		entry.initialize_android_loader().expect("Failed to initialize Android loader for OpenXR!");
