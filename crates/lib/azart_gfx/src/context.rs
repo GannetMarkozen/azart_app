@@ -58,7 +58,7 @@ impl GpuContext {
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 0] = [];
 
 	// List of core extensions.
-	const DEVICE_EXTENSION_NAMES: [&'static CStr; 10] = [
+	const DEVICE_EXTENSION_NAMES: [&'static CStr; 12] = [
 		ash::ext::descriptor_indexing::NAME,
 		ash::khr::buffer_device_address::NAME,
 		ash::khr::push_descriptor::NAME,
@@ -69,7 +69,8 @@ impl GpuContext {
 		ash::khr::shader_draw_parameters::NAME,
 		ash::khr::create_renderpass2::NAME,
 		ash::khr::timeline_semaphore::NAME,
-		//ash::khr::fragment_shading_rate::NAME,
+		ash::khr::fragment_shading_rate::NAME,
+		ash::ext::fragment_density_map::NAME,
 	];
 
 	pub fn new(extensions: &[&CStr], xr: Option<XrInstance>) -> Self {

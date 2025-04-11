@@ -165,15 +165,15 @@ impl Plugin for RenderPlugin {
 			.collect::<Vec<_>>();
 
 		let xr = (self.display_mode == DisplayMode::Xr).then(|| XrInstance::new());
-		let context = GpuContext::new(&extensions, xr);
+		let context = Arc::new(GpuContext::new(&extensions, xr));
 
 		// @NOTE: This should really only be launched when you want to play in VR.
-		if let Ok(session) = XrSession::new(&context) {
+		if let Ok(session) = XrSession::new(Arc::clone(&context)) {
 			app.insert_resource(session);
 		}
 
 		app
-			.insert_resource(GpuContextHandle::new(Arc::new(context)))
+			.insert_resource(GpuContextHandle::new(context))
 			.insert_state(self.display_mode)
 			.insert_resource(self.settings.clone())
 			.insert_state(self.display_mode)

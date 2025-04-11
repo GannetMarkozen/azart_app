@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::sync::Arc;
 use azart_utils::debug_string::DebugString;
 use openxr as xr;
@@ -11,7 +12,6 @@ use crate::xr::{XrInstance, XrSession};
 pub struct Swapchain {
 	name: DebugString,
 	pub(crate) handle: xr::Swapchain<xr::Vulkan>,
-	pub(crate) session: xr::Session<xr::Vulkan>,
 	pub(crate) frame_waiter: xr::FrameWaiter,
 	pub(crate) frame_stream: xr::FrameStream<xr::Vulkan>,
 	pub(crate) images: Box<[SwapchainImage]>,
@@ -32,12 +32,16 @@ impl Swapchain {
 		let &SwapchainCreateInfo { xr, session, .. } = create_info;
 
 		let (format, extent) = {
+			assert!(xr.instance.enumerate_view_configurations(xr.hmd).unwrap().contains(&xr::ViewConfigurationType::PRIMARY_STEREO),
+							"Primary stereo view configuration not supported!");
+
 			let view_configs = xr.instance.enumerate_view_configuration_views(xr.hmd, xr::ViewConfigurationType::PRIMARY_STEREO).unwrap();
-			println!("view_configs: {view_configs:?}");
+			assert!(view_configs.len() >= 2, "Primary stereo view configuration must have at least two views!");
+			assert_eq!(view_configs[0], view_configs[1], "Primary stereo view configuration must have the same view configuration!");
 
 			let view_config = view_configs[0];
 
-			let formats = session.handle.enumerate_swapchain_formats().unwrap();
+			let formats = session.enumerate_swapchain_formats().unwrap();
 			let format = formats
 				.iter()
 				.map(|&x| Format::from(vk::Format::from_raw(x as _)))
@@ -55,21 +59,16 @@ impl Swapchain {
 				create_flags: xr::SwapchainCreateFlags::PROTECTED_CONTENT,
 				usage_flags: create_info.usage,
 				format: <_ as Into<vk::Format>>::into(format).as_raw() as _,
-				sample_count: create_info.msaa.as_u32(),
+				sample_count: 1,
 				width: extent.x,
 				height: extent.y,
 				face_count: 1,
-				array_size: 1,
+				array_size: 2,// Stereo rendering.
 				mip_count: 1,
 			};
 
-			session.handle.create_swapchain(&create_info).expect("Failed to create OpenXR swapchain!")
+			session.create_swapchain(&create_info).expect("Failed to create OpenXR swapchain!")
 		};
-
-		#[cfg(debug_assertions)]
-		unsafe {
-			context.set_debug_name(name.as_str(), vk::SwapchainKHR::from_raw(swapchain.as_raw().into_raw()));
-		}
 
 		let images = swapchain
 			.enumerate_images()
@@ -113,7 +112,6 @@ impl Swapchain {
 			handle: swapchain,
 			frame_waiter,
 			frame_stream,
-			session: session.handle.clone(),
 			images,
 			current_image_index: 0,
 			extent,
@@ -143,10 +141,9 @@ impl Drop for Swapchain {
 
 pub struct SwapchainCreateInfo<'a> {
 	pub xr: &'a XrInstance,
-	pub session: &'a XrSession,
+	pub session: &'a xr::Session<xr::Vulkan>,
 	pub usage: xr::SwapchainUsageFlags,
 	pub format: Option<Format>,
-	pub msaa: MsaaCount,
 }
 
 pub struct SwapchainImage {

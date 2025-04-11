@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use ash::vk::Handle;
+use azart_gfx_utils::{Format, MsaaCount};
 use bevy::prelude::*;
 use crate::GpuContext;
 use openxr as xr;
+use crate::xr_swapchain::{Swapchain, SwapchainCreateInfo};
 
 pub struct XrInstance {
 	pub(crate) entry: xr::Entry,
@@ -55,15 +58,12 @@ impl XrInstance {
 #[derive(Resource)]
 pub struct XrSession {
 	pub(crate) handle: xr::Session<xr::Vulkan>,
-	pub(crate) frame_waiter: xr::FrameWaiter,
-	pub(crate) frame_stream: xr::FrameStream<xr::Vulkan>,
-	pub(crate) entry: xr::Entry,
-	pub(crate) instance: xr::Instance,
+	pub swapchain: Swapchain,
 }
 
 impl XrSession {
 	// Can only fail if the GpuContext was not created with an XrInstance.
-	pub fn new(context: &GpuContext) -> Result<Self, &'static str> {
+	pub fn new(context: Arc<GpuContext>) -> Result<Self, &'static str> {
 		let Some(xr) = &context.xr else {
 			return Err("XrInstance unavailable!");
 		};
@@ -80,12 +80,21 @@ impl XrSession {
 			unsafe { xr.instance.create_session(xr.hmd, &create_info) }.expect("Failed to create OpenXR session!")
 		};
 
+		let swapchain = {
+			let create_info = SwapchainCreateInfo {
+				xr: &xr,
+				session: &session,
+				usage: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::TRANSFER_DST,
+				format: Some(Format::RgbaU8Srgb),
+				msaa: MsaaCount::Sample4,
+			};
+
+			Swapchain::new("xr_swapchain".into(), Arc::clone(&context), frame_waiter, frame_stream, &create_info)
+		};
+
 		Ok(Self {
 			handle: session,
-			frame_waiter,
-			frame_stream,
-			entry: xr.entry.clone(),
-			instance: xr.instance.clone(),
+			swapchain,
 		})
 	}
 }
