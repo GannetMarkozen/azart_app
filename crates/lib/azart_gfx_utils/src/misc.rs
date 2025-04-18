@@ -359,63 +359,63 @@ pub fn shader_path(path: impl AsRef<Path>) -> ShaderPath {
 }
 
 #[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Reflect, Resource)]
-pub enum MsaaCount {
+pub enum Msaa {
 	#[default]
 	None,// No MSAA.
-	Sample2,
-	Sample4,
-	Sample8,
+	x2,
+	x4,
+	x8,
 }
 
-impl MsaaCount {
+impl Msaa {
 	// If Msaa > 1.
 	#[inline(always)]
 	pub const fn enabled(&self) -> bool {
-		!matches!(self, MsaaCount::None)
+		!matches!(self, Msaa::None)
 	}
 
 	#[inline(always)]
 	pub const fn as_u32(&self) -> u32 {
 		match self {
-			MsaaCount::None => 1,
-			MsaaCount::Sample2 => 2,
-			MsaaCount::Sample4 => 4,
-			MsaaCount::Sample8 => 8,
+			Msaa::None => 1,
+			Msaa::x2 => 2,
+			Msaa::x4 => 4,
+			Msaa::x8 => 8,
 		}
 	}
 	
 	#[inline(always)]
 	pub const fn as_vk_sample_count(&self) -> vk::SampleCountFlags {
 		match self {
-			MsaaCount::None => vk::SampleCountFlags::TYPE_1,
-			MsaaCount::Sample2 => vk::SampleCountFlags::TYPE_2,
-			MsaaCount::Sample4 => vk::SampleCountFlags::TYPE_4,
-			MsaaCount::Sample8 => vk::SampleCountFlags::TYPE_8,
+			Msaa::None => vk::SampleCountFlags::TYPE_1,
+			Msaa::x2 => vk::SampleCountFlags::TYPE_2,
+			Msaa::x4 => vk::SampleCountFlags::TYPE_4,
+			Msaa::x8 => vk::SampleCountFlags::TYPE_8,
 		}
 	}
 }
 
-impl Into<u32> for MsaaCount {
+impl Into<u32> for Msaa {
 	#[inline(always)]
 	fn into(self) -> u32 {
 		self.as_u32()
 	}
 }
 
-impl Into<vk::SampleCountFlags> for MsaaCount {
+impl Into<vk::SampleCountFlags> for Msaa {
 	#[inline(always)]
 	fn into(self) -> vk::SampleCountFlags {
 		self.as_vk_sample_count()
 	}
 }
 
-impl From<vk::SampleCountFlags> for MsaaCount {
+impl From<vk::SampleCountFlags> for Msaa {
 	fn from(x: vk::SampleCountFlags) -> Self {
 		match x {
-			vk::SampleCountFlags::TYPE_2 => MsaaCount::Sample2,
-			vk::SampleCountFlags::TYPE_4 => MsaaCount::Sample4,
-			vk::SampleCountFlags::TYPE_8 => MsaaCount::Sample8,
-			_ => MsaaCount::None,
+			vk::SampleCountFlags::TYPE_2 => Msaa::x2,
+			vk::SampleCountFlags::TYPE_4 => Msaa::x4,
+			vk::SampleCountFlags::TYPE_8 => Msaa::x8,
+			_ => Msaa::None,
 		}
 	}
 }

@@ -1,13 +1,15 @@
 use std::sync::Arc;
 use ash::vk::Handle;
-use azart_gfx_utils::{Format, MsaaCount};
+use azart_gfx_utils::{Format, Msaa};
 use bevy::prelude::*;
 use crate::GpuContext;
 use openxr as xr;
 use crate::xr_swapchain::{Swapchain, SwapchainCreateInfo};
 
+#[derive(Deref)]
 pub struct XrInstance {
 	pub(crate) entry: xr::Entry,
+	#[deref]
 	pub(crate) instance: xr::Instance,
 	pub(crate) hmd: xr::SystemId,
 }
@@ -57,14 +59,16 @@ impl XrInstance {
 
 #[derive(Resource)]
 pub struct XrSession {
-	pub(crate) handle: xr::Session<xr::Vulkan>,
+	pub handle: xr::Session<xr::Vulkan>,
 	pub swapchain: Swapchain,
+	pub space: xr::Space,
 }
 
 impl XrSession {
 	// Can only fail if the GpuContext was not created with an XrInstance.
 	pub fn new(context: Arc<GpuContext>) -> Result<Self, &'static str> {
-		let Some(xr) = &context.xr else {
+		todo!();
+		/*let Some(xr) = &context.xr else {
 			return Err("XrInstance unavailable!");
 		};
 
@@ -84,17 +88,27 @@ impl XrSession {
 			let create_info = SwapchainCreateInfo {
 				xr: &xr,
 				session: &session,
-				usage: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::TRANSFER_DST,
+				usage: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::TRANSFER_DST | xr::SwapchainUsageFlags::TRANSFER_SRC,
 				format: Some(Format::RgbaU8Srgb),
-				msaa: MsaaCount::Sample4,
 			};
 
 			Swapchain::new("xr_swapchain".into(), Arc::clone(&context), frame_waiter, frame_stream, &create_info)
 		};
 
+		assert!(session.enumerate_reference_spaces().unwrap().contains(&xr::ReferenceSpaceType::STAGE));
+		let space = session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY).expect("Failed to create reference space!");
+
 		Ok(Self {
 			handle: session,
 			swapchain,
-		})
+			space,
+		})*/
 	}
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
+pub enum XrState {
+	#[default]
+	Idle,
+	Focused,
 }

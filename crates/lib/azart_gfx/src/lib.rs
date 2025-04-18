@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 pub mod context;
-pub mod render_plugin;
+//pub mod render_plugin;
 
 pub mod swapchain;
 pub mod render_pass;
@@ -13,6 +13,7 @@ mod render_settings;
 mod descriptor_set;
 pub mod xr;
 mod xr_swapchain;
+pub mod render;
 
 pub use context::*;
 pub use image::*;

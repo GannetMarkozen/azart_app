@@ -1,42 +1,23 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use ash::vk;
-use crate::GpuContext;
-use azart_gfx_utils::MsaaCount;
 use azart_utils::debug_string::DebugString;
+use ash::vk;
+use azart_gfx_utils::Msaa;
+use crate::GpuContext;
 
+// @TODO: Make safe ctor.
 pub struct RenderPass {
-	name: DebugString,
-	pub(crate) handle: vk::RenderPass,
-	pub(crate) context: Arc<GpuContext>,
+	pub name: DebugString,
+	pub context: Arc<GpuContext>,
+	pub handle: vk::RenderPass,
+	pub msaa: Msaa,
+	pub multiview_count: Option<NonZeroUsize>,
 }
 
-// TODO
-impl RenderPass {
-	pub fn new(
-		name: DebugString,
-		context: Arc<GpuContext>,
-		info: &RenderPassInfo,
-	) -> Self {
-		todo!();
-		/*let render_pass = {
-			let attachments = [
-				vk::AttachmentDescription::default()
-					.format(vk::Format::R8G8B8A8_SRGB)
-			];
-
-			let create_info = vk::RenderPassCreateInfo::default()
-				.attachments(&attachments);
-
-		};
-
-		Self {
-			name,
-			context,
-		}*/
+impl Drop for RenderPass {
+	fn drop(&mut self) {
+		unsafe {
+			self.context.device.destroy_render_pass(self.handle, None);
+		}
 	}
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RenderPassInfo {
-	pub msaa: MsaaCount,
 }

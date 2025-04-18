@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::io::Write;
 use std::path::Path;
 
 // Platform agnostic io operations.

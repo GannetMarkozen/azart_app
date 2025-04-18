@@ -1,17 +1,20 @@
-use std::ffi::{c_char, CStr, CString, OsStr};
+use std::ffi::{c_char, c_void, CStr, CString, OsStr};
 use std::io::{BufReader, Read};
 use std::mem::ManuallyDrop;
 use std::num::NonZero;
 use std::ops::{Deref, Range};
 use std::{mem, ptr, slice};
 use std::any::TypeId;
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use ash::vk;
 use ash::vk::Handle;
-use bevy::log::{error, info, warn};
+use bevy::log::{debug, error, info, warn};
 use bevy::math::UVec2;
-use bevy::prelude::{FromReflect, PartialReflect, Resource};
+use bevy::prelude::{Deref, FromReflect, PartialReflect, Resource};
 use bevy::tasks::IoTaskPool;
 use bevy::utils::HashSet;
 use gpu_allocator::{AllocationSizes, AllocatorDebugSettings, MemoryLocation};
@@ -19,7 +22,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use thiserror::Error;
 use crate::buffer::Buffer;
 use crate::Image;
-use azart_gfx_utils::misc::{MsaaCount, ShaderPath};
+use azart_gfx_utils::misc::{Msaa, ShaderPath};
 use azart_gfx_utils::spirv::Spirv;
 use azart_utils::debug_string::{DebugString, dbgfmt};
 use azart_utils::io;
@@ -28,17 +31,19 @@ use bevy::reflect::serde::{ReflectDeserializer, TypedReflectDeserializer};
 use bevy::reflect::TypeRegistry;
 use serde::de::DeserializeSeed;
 use vk_sync::*;
-use crate::xr::XrInstance;
+use openxr as xr;
+use crate::render::xr::XrInstance;
 
 pub struct GpuContext {
 	pub entry: ash::Entry,
 	pub instance: ash::Instance,
 	pub physical_device: vk::PhysicalDevice,
 	pub device: ash::Device,
+	#[cfg(debug_assertions)]
+	pub dbg_messenger: vk::DebugUtilsMessengerEXT,
 	pub queue_families: QueueFamilies,
-	pub extensions: Extensions,
-	pub capabilities: Capabilities,
-	pub xr: Option<XrInstance>,// Only valid if running with OpenXR (not necessarily playing with VR).
+	pub exts: Extensions,
+	pub limits: Limits,
 	pub(crate) allocator: ManuallyDrop<Mutex<Allocator>>,
 }
 
@@ -52,7 +57,7 @@ impl GpuContext {
 
 	#[cfg(debug_assertions)]
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 1] = [
-		ash::ext::debug_utils::NAME
+		ash::ext::debug_utils::NAME,
 	];
 	#[cfg(not(debug_assertions))]
 	const INSTANCE_EXTENSION_NAMES: [&'static CStr; 0] = [];
@@ -64,16 +69,16 @@ impl GpuContext {
 		ash::khr::push_descriptor::NAME,
 		ash::ext::extended_dynamic_state::NAME,
 		ash::khr::swapchain::NAME,
-		ash::khr::multiview::NAME,
 		ash::khr::draw_indirect_count::NAME,
-		ash::khr::shader_draw_parameters::NAME,
 		ash::khr::create_renderpass2::NAME,
 		ash::khr::timeline_semaphore::NAME,
 		ash::khr::fragment_shading_rate::NAME,
 		ash::ext::fragment_density_map::NAME,
+		ash::khr::create_renderpass2::NAME,
+		ash::khr::uniform_buffer_standard_layout::NAME,// For ubo scalar layout.
 	];
 
-	pub fn new(extensions: &[&CStr], xr: Option<XrInstance>) -> Self {
+	pub fn new(extensions: &[&CStr], xr: Option<(&xr::Instance, xr::SystemId)>) -> Self {
 		unsafe {
 			let entry = ash::Entry::load().expect("failed to create entry point for vulkan!");
 			let instance = {
@@ -137,24 +142,47 @@ impl GpuContext {
 					.engine_name(c"azart engine")
 					.engine_version(vk::make_api_version(0, 1, 0, 0));
 
-				let create_info = vk::InstanceCreateInfo::default()
+				#[cfg(debug_assertions)]
+				let mut debug_messenger_ext = layer_names
+					.iter()
+					.any(|&name| unsafe { CStr::from_ptr(name) } == c"VK_LAYER_KHRONOS_validation")
+					.then(|| vk::DebugUtilsMessengerCreateInfoEXT::default()
+						.message_severity(
+							vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
+								| vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+								| vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+								| vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+						)
+						.message_type(
+							vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+								| vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+								| vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
+						)
+						.pfn_user_callback(Some(dbg_messenger_callback))
+					);
+
+				let mut create_info = vk::InstanceCreateInfo::default()
 					.enabled_layer_names(&layer_names)
 					.enabled_extension_names(&extensions)
 					.application_info(&app_info);
 
-				match &xr {
-					Some(xr) => {
-						#[cfg(debug_assertions)]
-						{
-							const XR_API_VERSION: openxr::Version = openxr::Version::new(1, 0, 0);
-							let requirements = xr.instance.graphics_requirements::<openxr::Vulkan>(xr.hmd).expect("Failed to get OpenXR graphics requirements for Vulkan!");
+				#[cfg(debug_assertions)]
+				if let Some(debug_messenger_ext) = &mut debug_messenger_ext {
+					create_info = create_info.push_next(debug_messenger_ext);
+				}
 
-							assert!(XR_API_VERSION >= requirements.min_api_version_supported, "API version {:?} is less than min API version supported {:?} for OpenXR!", XR_API_VERSION, requirements.min_api_version_supported);
-							assert!(XR_API_VERSION <= requirements.max_api_version_supported, "API version {:?} is greater than max API version supported {:?} for OpenXR!", XR_API_VERSION, requirements.max_api_version_supported);
-						}
+				match xr {
+					Some((xr, hmd)) => {
+						const XR_API_VERSION: xr::Version = xr::Version::new(1, 0, 0);
 
-						let instance = xr.instance.create_vulkan_instance(
-							xr.hmd,
+						// @NOTE: MUST call this before creating a session otherwise you will get esoteric errors. Regardless of if you use the result.
+						let requirements = xr.graphics_requirements::<xr::Vulkan>(hmd).expect("Failed to get OpenXR graphics requirements for Vulkan!");
+
+						assert!(XR_API_VERSION >= requirements.min_api_version_supported, "API version {:?} is less than min API version supported {:?} for OpenXR!", XR_API_VERSION, requirements.min_api_version_supported);
+						assert!(XR_API_VERSION <= requirements.max_api_version_supported, "API version {:?} is greater than max API version supported {:?} for OpenXR!", XR_API_VERSION, requirements.max_api_version_supported);
+
+						let instance = xr.create_vulkan_instance(
+							hmd,
 							mem::transmute(entry.static_fn().get_instance_proc_addr),
 							&create_info as *const _ as *const _,
 						).unwrap().unwrap();
@@ -165,10 +193,10 @@ impl GpuContext {
 				}
 			};
 
-			let physical_device = match &xr {
-				Some(xr) => {
-					let physical_device = xr.instance.vulkan_graphics_device(
-						xr.hmd,
+			let physical_device = match xr {
+				Some((xr, hmd)) => {
+					let physical_device = xr.vulkan_graphics_device(
+						hmd,
 						instance.handle().as_raw() as *const _,
 					).unwrap();
 
@@ -205,7 +233,29 @@ impl GpuContext {
 				}
 			};
 
-			let device = {
+			#[cfg(debug_assertions)]
+			let (instance_debug_utils, debug_messenger) = {
+				let instance_debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
+				let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+					.message_severity(
+						vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
+							| vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+							| vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+							| vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+					)
+					.message_type(
+						vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+							| vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+							| vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
+					)
+					.pfn_user_callback(Some(dbg_messenger_callback));
+
+				let messenger = unsafe { instance_debug_utils.create_debug_utils_messenger(&create_info, None) }.unwrap();
+
+				(instance_debug_utils, messenger)
+			};
+
+			let (device, buffer_device_address_enabled) = {
 				let available_extensions = instance
 					.enumerate_device_extension_properties(physical_device)
 					.unwrap()
@@ -213,7 +263,9 @@ impl GpuContext {
 					.map(|x| CStr::from_ptr(x.extension_name.as_ptr()).to_owned())
 					.collect::<HashSet<_>>();
 
-				let extensions = Self::DEVICE_EXTENSION_NAMES
+				println!("Available extensions: {available_extensions:?}");
+
+				let exts = Self::DEVICE_EXTENSION_NAMES
 					.iter()
 					.filter(|&&x| {
 						let available = available_extensions.contains(x);
@@ -242,57 +294,99 @@ impl GpuContext {
 					)
 					.collect::<Vec<_>>();
 
-				let available_features = instance.get_physical_device_features(physical_device);
-				let mut features = vk::PhysicalDeviceFeatures::default();
+				let (available_features_1_0, available_features_1_1) = {
+					let mut features_1_1 = vk::PhysicalDeviceVulkan11Features::default();
+					let mut features2 = vk::PhysicalDeviceFeatures2::default()
+						.push_next(&mut features_1_1);
 
-				macro_rules! enable_feature {
+					instance.get_physical_device_features2(physical_device, &mut features2);
+
+					(features2.features, features_1_1)
+				};
+
+				let mut features_1_0 = vk::PhysicalDeviceFeatures::default();
+				let mut features_1_1 = vk::PhysicalDeviceVulkan11Features::default();
+
+				macro_rules! enable_feature_1_0 {
 					($feature:ident) => {
-						if available_features.$feature == vk::TRUE {
-							features.$feature = vk::TRUE;
+						if available_features_1_0.$feature == vk::TRUE {
+							features_1_0.$feature = vk::TRUE;
 						} else {
-							warn!("Feature {} is not available. Removing from list of features", stringify!($feature));
+							warn!("Physical device feature (1.0) {} is not available. Removing from list of features", stringify!($feature));
 						}
 					}
 				}
 
-				enable_feature!(multi_draw_indirect);
-				enable_feature!(multi_viewport);
-				enable_feature!(shader_storage_buffer_array_dynamic_indexing);
-				enable_feature!(shader_storage_image_array_dynamic_indexing);
-				enable_feature!(shader_uniform_buffer_array_dynamic_indexing);
-				enable_feature!(shader_storage_image_array_dynamic_indexing);
-				enable_feature!(shader_storage_buffer_array_dynamic_indexing);
+				macro_rules! enable_feature_1_1 {
+					($feature:ident) => {
+						if available_features_1_1.$feature == vk::TRUE {
+							features_1_1.$feature = vk::TRUE;
+							true
+						} else {
+							error!("Physical device feature (1.1) {} is not available. Removing from list of features", stringify!($feature));
+							false
+						}
+					}
+				}
 
-				let mut buffer_device_address_features = vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
-					.buffer_device_address(true);
+				enable_feature_1_0!(multi_draw_indirect);
+				enable_feature_1_0!(multi_viewport);
+				enable_feature_1_0!(shader_storage_buffer_array_dynamic_indexing);
+				enable_feature_1_0!(shader_storage_image_array_dynamic_indexing);
+				enable_feature_1_0!(shader_uniform_buffer_array_dynamic_indexing);
+				enable_feature_1_0!(shader_storage_image_array_dynamic_indexing);
+				enable_feature_1_0!(shader_storage_buffer_array_dynamic_indexing);
 
-				let create_info = vk::DeviceCreateInfo::default()
-					.enabled_extension_names(&extensions)
-					.queue_create_infos(&queue_create_infos)
-					.enabled_features(&features)
-					.push_next(&mut buffer_device_address_features);
+				enable_feature_1_1!(multiview);
+				enable_feature_1_1!(shader_draw_parameters);
 
-				match &xr {
-					Some(xr) => {
-						let device = xr.instance.create_vulkan_device(
-							xr.hmd,
+				let buffer_device_address_enabled = exts
+					.iter()
+					.any(|&ext| unsafe { CStr::from_ptr(ext) } == ash::ext::buffer_device_address::NAME);
+
+				let mut buffer_device_address_features = buffer_device_address_enabled.then(|| vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
+					.buffer_device_address(true)
+				);
+
+				let mut create_info = vk::DeviceCreateInfo::default()
+					.push_next(&mut features_1_1)
+					.enabled_features(&features_1_0)
+					.enabled_extension_names(&exts)
+					.queue_create_infos(&queue_create_infos);
+
+				if let Some(buffer_device_address_features) = &mut buffer_device_address_features {
+					create_info = create_info.push_next(buffer_device_address_features);
+				}
+
+				let device = match xr {
+					Some((xr, hmd)) => {
+						let device = xr.create_vulkan_device(
+							hmd,
 							mem::transmute(entry.static_fn().get_instance_proc_addr),
 							physical_device.as_raw() as _,
 							&create_info as *const _ as *const _,
-						).unwrap().unwrap();
+						)
+							.unwrap()
+							.unwrap();
 
 						ash::Device::load(&instance.fp_v1_0(), vk::Device::from_raw(device as _))
 					},
 					None => instance.create_device(physical_device, &create_info, None).expect("Failed to create logical device!"),
-				}
+				};
+
+				(device, buffer_device_address_enabled)
 			};
 			
-			let extensions = Extensions {
+			let exts = Extensions {
 				swapchain: ash::khr::swapchain::Device::new(&instance, &device),
 				surface: ash::khr::surface::Instance::new(&entry, &instance),
 				draw_indirect_count: ash::khr::draw_indirect_count::Device::new(&instance, &device),
+				create_render_pass2: ash::khr::create_renderpass2::Device::new(&instance, &device),
+				push_descriptor: ash::khr::push_descriptor::Device::new(&instance, &device),
 				#[cfg(debug_assertions)]
-				debug_utils: ash::ext::debug_utils::Device::new(&instance, &device),
+				instance_debug_utils,
+				#[cfg(debug_assertions)]
+				device_debug_utils: ash::ext::debug_utils::Device::new(&instance, &device),
 			};
 
 			let allocator = {
@@ -311,27 +405,34 @@ impl GpuContext {
 					device: device.clone(),
 					physical_device,
 					debug_settings,
-					buffer_device_address: true,
+					buffer_device_address: buffer_device_address_enabled,// Will be forcefully disabled by RenderDoc!
 					allocation_sizes: AllocationSizes::default(),
 				};
 
 				Allocator::new(&create_info).unwrap()
 			};
 
-			let capabilities = Capabilities {
-				max_msaa: {
-					let props = instance.get_physical_device_properties(physical_device);
-					let mask = props.limits.framebuffer_color_sample_counts & props.limits.framebuffer_depth_sample_counts;
-					if mask.contains(vk::SampleCountFlags::TYPE_8) {
-						MsaaCount::Sample8
-					} else if mask.contains(vk::SampleCountFlags::TYPE_4) {
-						MsaaCount::Sample4
-					} else if mask.contains(vk::SampleCountFlags::TYPE_2) {
-						MsaaCount::Sample2
-					} else {
-						MsaaCount::None
-					}
-				},
+			let limits = {
+				let props = instance.get_physical_device_properties(physical_device);
+				Limits {
+					max_msaa: {
+						let mask = props.limits.framebuffer_color_sample_counts & props.limits.framebuffer_depth_sample_counts;
+						if mask.contains(vk::SampleCountFlags::TYPE_8) {
+							Msaa::x8
+						} else if mask.contains(vk::SampleCountFlags::TYPE_4) {
+							Msaa::x4
+						} else if mask.contains(vk::SampleCountFlags::TYPE_2) {
+							Msaa::x2
+						} else {
+							Msaa::None
+						}
+					},
+					ubo_max_size: props.limits.max_uniform_buffer_range as _,
+					ubo_min_alignment: props.limits.min_uniform_buffer_offset_alignment as _,
+					ssbo_max_size: props.limits.max_storage_buffer_range as _,
+					ssbo_min_alignment: props.limits.min_storage_buffer_offset_alignment as _,
+					push_constants_max_size: props.limits.max_push_constants_size as _,
+				}
 			};
 
 			Self {
@@ -339,10 +440,11 @@ impl GpuContext {
 				instance,
 				physical_device,
 				device,
+				#[cfg(debug_assertions)]
+				dbg_messenger: debug_messenger,
 				queue_families,
-				extensions,
-				capabilities,
-				xr,
+				exts,
+				limits,
 				allocator: ManuallyDrop::new(Mutex::new(allocator)),
 			}
 		}
@@ -500,7 +602,7 @@ impl GpuContext {
 	pub fn immediate_cmd<T>(&self, queue_family: u32, closure: impl FnOnce(vk::CommandBuffer) -> T) -> T {
 		assert!(queue_family == self.queue_families.graphics || queue_family == self.queue_families.compute || queue_family == self.queue_families.transfer);
 		
-		let command_pool = {
+		let cmd_pool = {
 			let create_info = vk::CommandPoolCreateInfo::default()
 				.queue_family_index(self.queue_families.graphics);
 			
@@ -509,7 +611,7 @@ impl GpuContext {
 		
 		let cmd = {
 			let create_info = vk::CommandBufferAllocateInfo::default()
-				.command_pool(command_pool)
+				.command_pool(cmd_pool)
 				.level(vk::CommandBufferLevel::PRIMARY)
 				.command_buffer_count(1);
 			
@@ -550,8 +652,8 @@ impl GpuContext {
 		// Wait for submit to complete.
 		unsafe {
 			self.device.destroy_fence(one_time_submit_fence, None);
-			self.device.free_command_buffers(command_pool, slice::from_ref(&cmd));
-			self.device.destroy_command_pool(command_pool, None);
+			self.device.free_command_buffers(cmd_pool, slice::from_ref(&cmd));
+			self.device.destroy_command_pool(cmd_pool, None);
 		}
 		
 		result
@@ -631,7 +733,7 @@ impl GpuContext {
 	// @TODO: Optimize.
 	pub fn upload_image<T>(&self, image: &Image, mips: Option<Range<u32>>, closure: impl FnOnce(&mut [&mut [u8]]) -> T) -> T {
 		assert!(image.usage.contains(vk::ImageUsageFlags::TRANSFER_DST), "Image {} must be created with TRANSFER_DST usage flag!", image.name());
-		assert_eq!(image.msaa, MsaaCount::None, "Can not upload Msaa target image with sample count {:?}", image.msaa);
+		assert_eq!(image.msaa, Msaa::None, "Can not upload Msaa target image with sample count {:?}", image.msaa);
 
 		let mips = mips.unwrap_or(0..image.mips());
 
@@ -774,7 +876,7 @@ impl GpuContext {
 		unsafe { self.device.device_wait_idle().expect("Failed to wait for device to become idle!"); }
 	}
 
-	pub fn max_msaa_samples(&self) -> MsaaCount {
+	pub fn max_msaa_samples(&self) -> Msaa {
 		let props = unsafe { self.instance.get_physical_device_properties(self.physical_device) };
 		let sample_count = props.limits.framebuffer_color_sample_counts & props.limits.framebuffer_depth_sample_counts;
 		let sample_count = vk::SampleCountFlags::from_raw(1 << sample_count.as_raw().trailing_zeros());// Use the smallest available sample count.
@@ -789,7 +891,7 @@ impl GpuContext {
 			.object_handle(handle);
 
 		//unsafe { self.extensions.debug_utils.set_debug_utils_object_name(&name_info) }.expect("Failed to set debug name!");
-		let result = unsafe { self.extensions.debug_utils.set_debug_utils_object_name(&name_info) };
+		let result = unsafe { self.exts.device_debug_utils.set_debug_utils_object_name(&name_info) };
 		if let Err(e) = result {
 			error!("Failed to set debug name {}!: {e}", name.to_str().unwrap_or("<invalid>"));
 		}
@@ -805,9 +907,16 @@ impl GpuContext {
 
 impl Drop for GpuContext {
 	fn drop(&mut self) {
+		self.wait_idle();
+
 		unsafe {
 			ManuallyDrop::drop(&mut self.allocator);
+
 			self.device.destroy_device(None);
+
+			#[cfg(debug_assertions)]
+			self.exts.instance_debug_utils.destroy_debug_utils_messenger(self.dbg_messenger, None);
+
 			self.instance.destroy_instance(None);
 		}
 	}
@@ -823,32 +932,27 @@ pub struct Extensions {
 	pub swapchain: ash::khr::swapchain::Device,
 	pub surface: ash::khr::surface::Instance,
 	pub draw_indirect_count: ash::khr::draw_indirect_count::Device,
+	pub create_render_pass2: ash::khr::create_renderpass2::Device,
+	pub push_descriptor: ash::khr::push_descriptor::Device,
 	#[cfg(debug_assertions)]
-	pub debug_utils: ash::ext::debug_utils::Device,
+	pub instance_debug_utils: ash::ext::debug_utils::Instance,
+	#[cfg(debug_assertions)]
+	pub device_debug_utils: ash::ext::debug_utils::Device,
 }
 
 #[derive(Debug)]
-pub struct Capabilities {
-	pub max_msaa: MsaaCount,
+pub struct Limits {
+	pub max_msaa: Msaa,
+	pub ubo_max_size: usize,
+	pub ubo_min_alignment: usize,
+	pub ssbo_max_size: usize,
+	pub ssbo_min_alignment: usize,
+	pub push_constants_max_size: usize,
 }
 
 // Bevy Resource that holds an Arc<GpuContext>.
-#[derive(Resource)]
+#[derive(Resource, Deref)]
 pub struct GpuContextHandle(pub Arc<GpuContext>);
-
-impl GpuContextHandle {
-	pub const fn new(context: Arc<GpuContext>) -> Self {
-		Self(context)
-	}
-}
-
-impl Deref for GpuContextHandle {
-	type Target = Arc<GpuContext>;
-
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
-}
 
 pub struct ShaderModule<'a> {
 	pub(crate) handle: vk::ShaderModule,
@@ -872,4 +976,173 @@ pub enum ShaderModuleError {
 	UnknownFileError(String, std::io::Error),
 	#[error("No .spv suffix on path!")]
 	NotSpv,
+}
+
+#[must_use = "RAII object"]
+pub struct RhiLabel<'a> {
+	context: &'a GpuContext,
+	cmd: &'a vk::CommandBuffer,
+}
+
+impl<'a> RhiLabel<'a> {
+	#[inline]
+	pub fn new(name: &str, context: &'a GpuContext, cmd: &'a vk::CommandBuffer) -> Self {
+		#[cfg(debug_assertions)]
+		unsafe {
+			let name = CString::new(name).unwrap();
+
+			context.exts.device_debug_utils.cmd_begin_debug_utils_label(
+				*cmd,
+				&vk::DebugUtilsLabelEXT::default()
+					.label_name(name.as_c_str())
+					.color([1.0, 0.0, 1.0, 1.0]),
+			);
+		}
+
+		Self {
+			context,
+			cmd,
+		}
+	}
+}
+
+#[cfg(debug_assertions)]
+impl Drop for RhiLabel<'_> {
+	#[inline]
+	fn drop(&mut self) {
+		unsafe { self.context.exts.device_debug_utils.cmd_end_debug_utils_label(*self.cmd); }
+	}
+}
+
+#[macro_export]
+#[cfg(debug_assertions)]
+macro_rules! rhi_label {
+	($label:expr, $context:expr, $cmd:expr) => {
+		let _label = $crate::RhiLabel::new($label, $context, $cmd);
+	};
+}
+
+#[macro_export]
+#[cfg(not(debug_assertions))]
+macro_rules ! rhi_label {
+	($($arg:tt)*) => {}
+}
+
+thread_local! {
+	// If this value is > 0. Vulkan debug messages will be disabled.
+	#[cfg(debug_assertions)]
+	static IGNORE_CALLBACK_DEPTH: Cell<usize> = Cell::new(0);
+}
+
+// While this object is alive, don't broadcast rhi messages.
+#[must_use = "You must bind this value for scoped semantics!"]
+pub struct RhiHush {
+	_phantom: PhantomData<std::rc::Rc<()>>,// Forces !Send and !Copy.
+}
+
+impl RhiHush {
+	#[inline]
+	pub fn new() -> Self {
+		#[cfg(debug_assertions)]
+		IGNORE_CALLBACK_DEPTH.set(IGNORE_CALLBACK_DEPTH.get() + 1);
+
+		Self {
+			_phantom: PhantomData,
+		}
+	}
+}
+
+#[cfg(debug_assertions)]
+impl Drop for RhiHush {
+	#[inline]
+	fn drop(&mut self) {
+		IGNORE_CALLBACK_DEPTH.set(IGNORE_CALLBACK_DEPTH.get() - 1);
+	}
+}
+
+#[macro_export]
+macro_rules! rhi_hush {
+	() => {
+		#[cfg(debug_assertions)]
+		let _guard = $crate::RhiHush::new();
+	};
+}
+
+unsafe extern "system" fn dbg_messenger_callback(
+	severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+	msg_type: vk::DebugUtilsMessageTypeFlagsEXT,
+	data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+	user_data: *mut c_void,
+) -> vk::Bool32 {
+	#[cfg(debug_assertions)]
+	if IGNORE_CALLBACK_DEPTH.get() > 0 {
+		return vk::FALSE;
+	}
+
+	assert_ne!(data, ptr::null());
+	let data = unsafe { &*data };
+
+	let msg_id = if data.p_message_id_name.is_null() { "<null>" } else { unsafe { CStr::from_ptr(data.p_message_id_name) }.to_str().unwrap() };
+	let msg = if data.p_message.is_null() { "<null>" } else { unsafe { CStr::from_ptr(data.p_message) }.to_str().unwrap() };
+
+	const IGNORE_MSGS: LazyLock<HashSet<&str>> = LazyLock::new(|| [
+		"BestPractices-vkCreateDevice-physical-device-features-not-retrieved",// Because get_physical_device_features is not called but get_physical_device_features2 is so this can be ignored.
+		"VUID-VkImageCreateInfo-pNext-01443",// openxr::FrameStream::end triggers this from swapchain image. Just ignore.
+	].into());
+
+	if IGNORE_MSGS.contains(msg_id) {
+		return vk::FALSE;
+	}
+
+	#[derive(Debug)]
+	pub enum MsgType {
+		General,
+		Validation,
+		Performance,
+	}
+
+	#[derive(Debug)]
+	pub enum Severity {
+		Verbose,
+		Info,
+		Warning,
+		Error,
+	}
+
+	let msg_type = match msg_type.as_raw().is_power_of_two() {
+		true => msg_type,
+		false => vk::DebugUtilsMessageTypeFlagsEXT::from_raw(1u32 << (32 - msg_type.as_raw().leading_zeros())),
+	};
+
+	let msg_type = match msg_type {
+		vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => MsgType::General,
+		vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => MsgType::Validation,
+		vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => MsgType::Performance,
+		_ => unreachable!("Unknown message type {msg_type:?}!"),
+	};
+
+	let severity = match severity {
+		vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => Severity::Verbose,
+		vk::DebugUtilsMessageSeverityFlagsEXT::INFO => Severity::Info,
+		vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => Severity::Warning,
+		vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => Severity::Error,
+		_ => unreachable!("Unknown severity {severity:?}!"),
+	};
+
+	let backtrace = std::backtrace::Backtrace::capture().to_string();
+	let module = match backtrace.contains("openxr::") {
+		true => return vk::FALSE,//"openxr",// TMP.
+		false => "application",
+	};
+
+	let msg = format!("VK[{msg_type:?}][{severity:?}][{msg_id}]: {msg}\nmodule: {module}\n");
+
+	match severity {
+		Severity::Verbose => debug!("{msg}"),
+		Severity::Info => info!("{msg}"),
+		Severity::Warning => warn!("{msg}"),
+		Severity::Error => error!("{msg}"),
+	}
+
+	vk::FALSE
 }

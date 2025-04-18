@@ -2,15 +2,18 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_EXT_debug_printf : enable
 #extension VK_KHR_shader_draw_parameters : enable
+#extension GL_EXT_scalar_block_layout : enable
+#extension GL_EXT_multiview : enable
+#extension GL_EXT_multiview2 : enable
 
 //#include "global_bindings.glsl"
 
 #define GLOBAL_SET_INDEX 4
 
-layout (binding = 0) uniform ViewMatrices {
+layout (binding = 0, scalar) uniform ViewMatrices {
     mat4 model;
-    mat4 view;
-    mat4 proj;
+    mat4 views[2];
+    mat4 projs[2];
 } view;
 
 //~
@@ -37,8 +40,6 @@ void main() {
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
     out_uv = uvs[gl_VertexIndex];*/
 
-    const float OFFSET = 2.5;
-    const vec3 actual_pos = pos + vec3(0.0, (gl_DrawID * 2 + gl_InstanceIndex) * OFFSET - (OFFSET / 2), 0.0);
-    gl_Position = view.proj * view.view * view.model * vec4(actual_pos, 1.0);
+    gl_Position = view.projs[gl_ViewIndex] * view.views[gl_ViewIndex] * view.model * vec4(pos, 1.0);
     out_uv = uv;
 }

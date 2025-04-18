@@ -1,6 +1,5 @@
 use azart::*;
 use bevy::prelude::*;
-
 fn main() {
 	#[cfg(debug_assertions)]
 	{
@@ -10,13 +9,5 @@ fn main() {
 
 	App::new()
 		.add_plugins(AzartPlugin)
-		.add_systems(Startup, load_flight_helmet)
 		.run();
-}
-
-fn load_flight_helmet(
-	mut commands: Commands,
-	asset_server: Res<AssetServer>,
-) {
-	
 }

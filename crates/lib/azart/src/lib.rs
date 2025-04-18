@@ -4,7 +4,7 @@ use bevy::input::InputPlugin;
 use bevy::log::LogPlugin;
 use bevy::MinimalPlugins;
 use bevy::state::app::StatesPlugin;
-use bevy::window::{PresentMode, WindowMode};
+use bevy::window::{ExitCondition, PresentMode, WindowMode};
 use bevy::winit::{WakeUp, WinitPlugin};
 
 pub struct AzartPlugin;
@@ -19,7 +19,7 @@ impl Plugin for AzartPlugin {
 			.add_plugins(WindowPlugin {
 				primary_window: Some(Window {
 					title: "azart".to_owned(),
-					present_mode: PresentMode::Fifo,
+					present_mode: PresentMode::Immediate,
 					focused: true,
 					..default()
 				}),
@@ -30,9 +30,22 @@ impl Plugin for AzartPlugin {
 			.add_plugins(LogPlugin::default());
 
 		#[cfg(feature = "gfx")]
-		app.add_plugins(azart_gfx::render_plugin::RenderPlugin::default());
+		app.add_plugins(azart_gfx::render::RenderPlugin::default());
 
-		//#[cfg(debug_assertions)]
+		#[cfg(not(target_os = "android"))]
 		app.add_plugins((FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin::default(), DiagnosticsPlugin));
 	}
+}
+
+fn runner(mut app: App) -> AppExit {
+	let mut count = 0_u64;
+	loop {
+		//println!("Running: {count}");
+
+		app.update();
+
+		count += 1;
+	}
+
+	AppExit::Success
 }

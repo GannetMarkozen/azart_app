@@ -14,19 +14,20 @@ crate-type = ["rlib", "cdylib"]
 azart = { path = "crates/lib/azart" }
 bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded", "android-native-activity"] }
 color-eyre = { version = "0.6.3" }
+tracing-subscriber = "0.3.19"
+tracing = "0.1.41"
 
 [build-dependencies]
 azart = { path = "crates/lib/azart" }
 color-eyre = "0.6.3"
-glsl = "7.0.0"
-shaderc = "0.9.1"
 walkdir = "2.5.0"
-spirv-reflect = "0.2.3"
-android-tools = "0.2.11"
+reqwest = { version = "0.12.15", features = ["blocking"] }
+zip = "2.6.1"
 
 [profile.release]
 opt-level = 3
-debug = 1
+debug = 2
+debug-assertions = false
 
 [profile.dev]
 opt-level = 1

@@ -5,7 +5,7 @@ use ash::vk;
 use bevy::utils::hashbrown::hash_map::Entry;
 use bevy::utils::HashMap;
 use crate::{GpuContext, ShaderModule};
-use azart_gfx_utils::{spirv, GpuResource, MsaaCount, ShaderPath, TriangleFillMode};
+use azart_gfx_utils::{spirv, GpuResource, Msaa, ShaderPath, TriangleFillMode};
 use azart_gfx_utils::spirv::*;
 use azart_utils::debug_string::DebugString;
 use spirv_headers::Op;
@@ -19,7 +19,7 @@ pub struct GraphicsPipeline {
 
 impl GraphicsPipeline {
 	// render_pass must outlive the construction time but can be safely destroyed afterward.
-	pub unsafe fn new(
+	pub fn new(
 		name: DebugString,
 		context: Arc<GpuContext>,
 		render_pass: vk::RenderPass,
@@ -114,27 +114,36 @@ impl GraphicsPipeline {
 
 			let descriptor_set_layouts = sets
 				.into_iter()
-				.map(|(_, bindings)| {
+				.enumerate()
+				.map(|(i, (_, bindings))| {
 					let bindings = bindings
 						.into_iter()
 						.map(|(_, (binding, stages))| vk::DescriptorSetLayoutBinding::default()
-							 .binding(binding.binding)
-							 .descriptor_type(binding.descriptor_type.into())
-							 .descriptor_count(match binding.container_type {
-								 ContainerType::Single => 1,
-								 ContainerType::Array(x) => x,
-								 ContainerType::Array2D([x, y]) => x * y,
-								 ContainerType::Array3D([x, y, z]) => x * y * z,
-								 ContainerType::RuntimeArray => vk::REMAINING_ARRAY_LAYERS,
-							 })
-							 .stage_flags(stages)
+							.binding(binding.binding)
+							.descriptor_type(binding.descriptor_type.into())
+							.descriptor_count(match binding.container_type {
+								ContainerType::Single => 1,
+								ContainerType::Array(x) => x,
+								ContainerType::Array2D([x, y]) => x * y,
+								ContainerType::Array3D([x, y, z]) => x * y * z,
+								ContainerType::RuntimeArray => vk::REMAINING_ARRAY_LAYERS,
+							})
+							.stage_flags(stages)
 						)
 						.collect::<Vec<_>>();
 
 					let create_info = vk::DescriptorSetLayoutCreateInfo::default()
+						.flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR)
 						.bindings(&bindings);
 
-					unsafe { context.device.create_descriptor_set_layout(&create_info, None) }.unwrap()
+					let descriptor_set_layout = unsafe { context.device.create_descriptor_set_layout(&create_info, None) }.unwrap();
+
+					#[cfg(debug_assertions)]
+					unsafe {
+						context.set_debug_name(format!("{name}_descriptor_set_layout[{i}]").as_str(), descriptor_set_layout);
+					}
+
+					descriptor_set_layout
 				})
 				.collect::<Vec<_>>();
 
@@ -237,6 +246,7 @@ impl GraphicsPipeline {
 		#[cfg(debug_assertions)]
 		unsafe {
 			context.set_debug_name(name.as_str(), pipeline);
+			context.set_debug_name(format!("{name}_layout").as_str(), pipeline_layout);
 		}
 
 		drop((vertex_shader_module, fragment_shader_module));
@@ -253,6 +263,10 @@ impl GraphicsPipeline {
 impl Drop for GraphicsPipeline {
 	fn drop(&mut self) {
 		unsafe {
+			for &descriptor_set_layout in self.descriptor_set_layouts.iter() {
+				self.context.device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+			}
+
 			self.context.device.destroy_pipeline_layout(self.layout, None);
 			self.context.device.destroy_pipeline(self.handle, None);
 		}
@@ -265,7 +279,7 @@ pub struct GraphicsPipelineCreateInfo<'a> {
 	pub vertex_shader: &'a ShaderPath,
 	pub fragment_shader: &'a ShaderPath,
 	pub vertex_inputs: &'a [VertexInput<'a>],// Can be zero-len.
-	pub msaa: MsaaCount,
+	pub msaa: Msaa,
 	pub fill_mode: TriangleFillMode,
 }
 

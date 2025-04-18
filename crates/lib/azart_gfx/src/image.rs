@@ -6,7 +6,7 @@ use bevy::math::UVec2;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use crate::GpuContext;
-use azart_gfx_utils::{MsaaCount, GpuResource, Format};
+use azart_gfx_utils::{Msaa, GpuResource, Format};
 use azart_utils::debug_string::DebugString;
 use bevy::reflect::Reflect;
 
@@ -21,7 +21,7 @@ pub struct Image {
 	pub(crate) format: Format,
 	pub(crate) usage: vk::ImageUsageFlags,
 	pub(crate) layout: vk::ImageLayout,
-	pub(crate) msaa: MsaaCount,
+	pub(crate) msaa: Msaa,
 	context: Arc<GpuContext>,
 }
 
@@ -31,6 +31,9 @@ impl Image {
 		context: Arc<GpuContext>,
 		create_info: &ImageCreateInfo,
 	) -> Self {
+		assert!(create_info.resolution.x > 0 && create_info.resolution.y > 0, "Resolution was {:?}! Must be greater than 0!", create_info.resolution);
+		assert!(create_info.layers > 0, "Layers was {:?}! Must be greater than 0!", create_info.layers);
+
 		let max_mip_levels = create_info.resolution.max_element().ilog2() + 1;
 		let mip_levels = match create_info.mip_count {
 			MipCount::None => 1,
@@ -39,12 +42,8 @@ impl Image {
 		};
 
 		let image = {
-			let flags = if create_info.layers == 1 { vk::ImageCreateFlags::empty() } else { vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE };
-
-			assert!(create_info.resolution.x > 0 && create_info.resolution.y > 0, "Resolution was {:?}! Must be greater than 0!", create_info.resolution);
-
 			assert!(
-				!matches!(unsafe { context.instance.get_physical_device_image_format_properties(context.physical_device, create_info.format.into(), vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, flags) },
+				!matches!(unsafe { context.instance.get_physical_device_image_format_properties(context.physical_device, create_info.format.into(), vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, vk::ImageCreateFlags::empty()) },
 				Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED)),
 				"Image \"{name}\" is not supported with: {:?}", create_info,
 			);
@@ -57,9 +56,9 @@ impl Image {
 					.depth(1)
 				)
 				.mip_levels(mip_levels)
-				.array_layers(1)
+				.array_layers(create_info.layers)
 				.format(create_info.format.into())
-				.flags(flags)
+				.flags(vk::ImageCreateFlags::empty())
 				.samples(create_info.msaa.as_vk_sample_count())
 				.tiling(create_info.tiling)
 				.usage(create_info.usage)
@@ -178,7 +177,7 @@ pub struct ImageCreateInfo {
 	pub usage: vk::ImageUsageFlags,
 	pub initial_layout: vk::ImageLayout,
 	pub tiling: vk::ImageTiling,
-	pub msaa: MsaaCount,
+	pub msaa: Msaa,
 	pub layers: u32,
 	pub memory: MemoryLocation,
 }
@@ -192,7 +191,7 @@ impl Default for ImageCreateInfo {
 			usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
 			initial_layout: vk::ImageLayout::UNDEFINED,
 			tiling: vk::ImageTiling::OPTIMAL,
-			msaa: MsaaCount::None,
+			msaa: Msaa::None,
 			layers: 1,
 			memory: MemoryLocation::GpuOnly,
 		}

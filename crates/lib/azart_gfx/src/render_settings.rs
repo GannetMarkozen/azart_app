@@ -1,17 +1,17 @@
-use azart_gfx_utils::MsaaCount;
+use azart_gfx_utils::Msaa;
 use bevy::prelude::*;
 
 #[derive(Clone, Debug, Reflect, Resource)]
 pub struct RenderSettings {
-	pub msaa: MsaaCount,
+	pub msaa: Msaa,
 	pub frames_in_flight: usize,
 }
 
 impl Default for RenderSettings {
 	fn default() -> Self {
 		Self {
-			msaa: MsaaCount::Sample4,
-			frames_in_flight: 2,
+			msaa: Msaa::x4,
+			frames_in_flight: 3,
 		}
 	}
 }
@@ -19,6 +19,6 @@ impl Default for RenderSettings {
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Hash, Reflect, States)]
 pub enum DisplayMode {
 	#[default]
-	Standard,
+	Std,
 	Xr,
 }

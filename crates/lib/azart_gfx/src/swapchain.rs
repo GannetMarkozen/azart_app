@@ -37,10 +37,11 @@ impl Swapchain {
 		window_handle: WindowHandle,
 		create_info: &SwapchainCreateInfo,
 	) -> Self {
+		todo!("Remove");
 		let surface = unsafe { ash_window::create_surface(&context.entry, &context.instance, display_handle.as_raw(), window_handle.as_raw(), None).unwrap() };
 
 		let (format, color_space) = {
-			let available_formats = unsafe { context.extensions.surface.get_physical_device_surface_formats(context.physical_device, surface) }.unwrap();
+			let available_formats = unsafe { context.exts.surface.get_physical_device_surface_formats(context.physical_device, surface) }.unwrap();
 			assert!(!available_formats.is_empty());
 
 			let selected_format = create_info.format.unwrap_or(vk::Format::B8G8R8A8_SRGB);
@@ -54,7 +55,7 @@ impl Swapchain {
 				})
 		};
 
-		let capabilities = unsafe { context.extensions.surface.get_physical_device_surface_capabilities(context.physical_device, surface) }.unwrap();
+		let capabilities = unsafe { context.exts.surface.get_physical_device_surface_capabilities(context.physical_device, surface) }.unwrap();
 		let extent = {
 			let mut extent = match create_info.extent {
 				Some(extent) => UVec2 {
@@ -98,7 +99,7 @@ impl Swapchain {
 				})
 				.old_swapchain(vk::SwapchainKHR::null());
 
-			unsafe { context.extensions.swapchain.create_swapchain(&create_info, None) }.unwrap()
+			unsafe { context.exts.swapchain.create_swapchain(&create_info, None) }.unwrap()
 		};
 		
 		let frames = (0..create_info.min_image_count)
@@ -156,7 +157,7 @@ impl Swapchain {
 			})
 			.collect::<Box<_>>();
 
-		let images = unsafe { context.extensions.swapchain.get_swapchain_images(swapchain) }
+		let images = unsafe { context.exts.swapchain.get_swapchain_images(swapchain) }
 			.unwrap()
 			.into_iter()
 			.enumerate()
@@ -236,7 +237,7 @@ impl Swapchain {
 		
 		let start = std::time::Instant::now();
 
-		let result = unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) };
+		let result = unsafe { self.context.exts.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) };
 
 		assert_ne!(result, Err(vk::Result::SUBOPTIMAL_KHR));
 
@@ -251,7 +252,7 @@ impl Swapchain {
 
 				self.recreate(None, None);
 
-				unsafe { self.context.extensions.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) }
+				unsafe { self.context.exts.swapchain.acquire_next_image(self.handle, u64::MAX, self.frames[self.current_frame_index.0].image_available_semaphore, vk::Fence::null()) }
 					.expect("Failed to acquire next image event after recreating swapchain!")
 			},
 			Err(e) => panic!("Failed to acquire next image. Error: {:?}", e),
@@ -270,7 +271,7 @@ impl Swapchain {
 	pub fn recreate(&mut self, extent: Option<UVec2>, present_mode: Option<PresentMode>) -> bool {
 		assert_ne!(self.surface, vk::SurfaceKHR::null());
 
-		let capabilities = unsafe { self.context.extensions.surface.get_physical_device_surface_capabilities(self.context.physical_device, self.surface) }.unwrap();
+		let capabilities = unsafe { self.context.exts.surface.get_physical_device_surface_capabilities(self.context.physical_device, self.surface) }.unwrap();
 		let extent = {
 			let mut extent = match extent {
 				Some(extent) => UVec2 {
@@ -333,10 +334,10 @@ impl Swapchain {
 				})
 				.old_swapchain(self.handle);
 
-			unsafe { self.context.extensions.swapchain.create_swapchain(&create_info, None) }.expect("failed to create swapchain!")
+			unsafe { self.context.exts.swapchain.create_swapchain(&create_info, None) }.expect("failed to create swapchain!")
 		};
 
-		let images = unsafe { self.context.extensions.swapchain.get_swapchain_images(new_swapchain) }.unwrap();
+		let images = unsafe { self.context.exts.swapchain.get_swapchain_images(new_swapchain) }.unwrap();
 		assert_eq!(images.len(), self.images.len());
 
 		// Destroy image views for old swapchain before destroying the old swapchain.
@@ -366,7 +367,7 @@ impl Swapchain {
 		}
 
 		// Destroy old swapchain.
-		unsafe { self.context.extensions.swapchain.destroy_swapchain(self.handle, None); }
+		unsafe { self.context.exts.swapchain.destroy_swapchain(self.handle, None); }
 
 		self.handle = new_swapchain;
 		self.extent = extent;
@@ -446,8 +447,8 @@ impl Drop for Swapchain {
 				device.destroy_semaphore(frame.render_finished_semaphore, None);
 			}
 			
-			self.context.extensions.swapchain.destroy_swapchain(self.handle, None);
-			self.context.extensions.surface.destroy_surface(self.surface, None);
+			self.context.exts.swapchain.destroy_swapchain(self.handle, None);
+			self.context.exts.surface.destroy_surface(self.surface, None);
 		}
 	}
 }
