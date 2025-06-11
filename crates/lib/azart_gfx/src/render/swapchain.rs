@@ -292,6 +292,11 @@ impl Swapchain {
 		}
 	}
 
+	#[inline(always)]
+	pub fn frame_in_flight(&self) -> &Frame {
+		&self.frames[self.current_frame_index]
+	}
+
 	#[inline]
 	const fn vk_present_mode(present_mode: PresentMode) -> vk::PresentModeKHR {
 		match present_mode {

@@ -10,10 +10,10 @@
 
 #define GLOBAL_SET_INDEX 4
 
-layout (binding = 0, scalar) uniform ViewMatrices {
-    mat4 model;
+layout (binding = 0, scalar) uniform GlobalUbo {
+    //mat4 model;
     mat4 views[2];
-    mat4 projs[2];
+    //mat4 projs[2];
 } view;
 
 //~
@@ -40,6 +40,7 @@ void main() {
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
     out_uv = uvs[gl_VertexIndex];*/
 
-    gl_Position = view.projs[gl_ViewIndex] * view.views[gl_ViewIndex] * view.model * vec4(pos, 1.0);
+    //gl_Position = view.projs[gl_ViewIndex] * view.model * vec4(pos, 1.0);
+    gl_Position = view.views[gl_ViewIndex] * vec4(pos, 1.0);
     out_uv = uv;
 }

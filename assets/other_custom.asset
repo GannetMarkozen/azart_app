@@ -1,0 +1,6 @@
+azart_app::Something
+(
+    value: 69,
+    name: "Fortnite",
+    dependencies: [],
+)

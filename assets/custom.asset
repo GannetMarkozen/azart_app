@@ -1,0 +1,10 @@
+azart_app::Something
+(
+    value: 10,
+    name: "Smitch",
+    dependencies: [
+        (
+            path: "assets/other_custom.asset",
+        ),
+    ],
+)

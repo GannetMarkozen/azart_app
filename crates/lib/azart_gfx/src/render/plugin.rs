@@ -29,7 +29,9 @@ use crate::buffer::{Buffer, BufferCreateInfo};
 use crate::glb::{Indices, Scene};
 use crate::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo, VertexAttribute, VertexInput};
 use crate::pbr::mesh::{Material, Mesh, MeshAssetHandler};
-use crate::render::base_pass::record_base_pass;
+use crate::render::base_pass::{base_pass, begin_base_pass, begin_base_pass_xr, end_base_pass, end_base_pass_xr, record_base_pass, update_global_ubo, update_global_ubo_xr, update_xr_camera_transform, XrFrameState};
+use crate::render::camera::{Camera, XrCamera};
+use crate::render::gpu_scene::{GlobalUbo, GpuScene};
 use crate::render::swapchain::{Swapchain, SwapchainDesc};
 use crate::render_pass::RenderPass;
 
@@ -46,7 +48,9 @@ impl Default for RenderPlugin {
 		Self {
 			settings: default(),
 			#[cfg(not(target_os = "android"))]
-			display_mode: DisplayMode::Std,
+			display_mode: std::env::args()
+				.find_map(|str| matches!(str.as_str(), "vr" | "xr").then(|| DisplayMode::Xr))
+				.unwrap_or(DisplayMode::Std),
 			/// Force DisplayMode::Xr on Android.
 			/// @TODO: Detect whether VR is enabled or not and automatically decide.
 			#[cfg(target_os = "android")]
@@ -111,7 +115,11 @@ impl Plugin for RenderPlugin {
 				Update,
 				(
 					create_swapchain_on_window_spawned,
-					render,
+					//render,
+					begin_base_pass,
+					update_global_ubo,
+					base_pass,
+					end_base_pass,
 				)
 					.chain()
 			)
@@ -119,7 +127,11 @@ impl Plugin for RenderPlugin {
 				Update,
 				(
 					poll_xr_events,
-					render_xr.run_if(in_state(XrState::Focused))
+					update_xr_camera_transform,
+					begin_base_pass_xr,
+					update_global_ubo_xr,
+					base_pass,
+					end_base_pass_xr,
 				)
 					.chain()
 					.run_if(in_state(DisplayMode::Xr))
@@ -445,6 +457,8 @@ fn create_xr_swapchain(
 			usage: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::TRANSFER_SRC | xr::SwapchainUsageFlags::TRANSFER_DST,
 		},
 	));
+
+	commands.insert_resource(XrFrameState(None));
 }
 
 fn create_swapchain_on_window_spawned(
@@ -500,6 +514,30 @@ fn create_global_resources(
 	let asset: Asset<Mesh> = block_on(cache.load("assets/corset/pCube49.mesh")).expect("Failed to load pCube49!");
 	println!("ASSET: {asset:?}");
 	println!("base_color: {:?}", &*asset.material.base_color);
+
+	match display_mode.get() {
+		DisplayMode::Xr => _ = commands.spawn((
+			XrCamera::default(),
+			Transform::default(),
+			//Transform::from_matrix(Mat4::look_at_rh(Vec3::new(0.0, 3.0, -3.0), Vec3::ZERO, Vec3::Y)),
+		)),
+		DisplayMode::Std => _ = commands.spawn((
+			Camera { fov: 45.0 },
+			Transform::from_matrix(Mat4::look_at_rh(Vec3::new(0.0, 3.0, -3.0), Vec3::ZERO, Vec3::Y)),
+		)),
+	}
+
+	commands.insert_resource(GpuScene {
+		global_ubo: Buffer::new(
+			"global_ubo".into(),
+			Arc::clone(&cx),
+			&BufferCreateInfo {
+				size: align_to(size_of::<GlobalUbo>(), cx.limits.ubo_min_align) * settings.frames_in_flight,
+				usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+				memory: MemoryLocation::CpuToGpu,// Updated every frame so just mapped to the CPU.
+			},
+		),
+	});
 
 	let pbr_pipeline = PbrPipeline(GraphicsPipeline::new(
 		"pbr_pipeline".into(),
@@ -975,7 +1013,7 @@ fn render_xr(
 	let frame_index = (swapchain.current_frame_index + 1) % swapchain.frames.len();
 	swapchain.handle.wait_image(xr::Duration::INFINITE).expect("Failed to wait image!");
 
-	swapchain.current_image_index = image_index;
+	swapchain.current_frame_buffer_index = image_index;
 	swapchain.current_frame_index = frame_index;
 
 	let (view_flags, views) = session.locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, frame_state.predicted_display_time, &space).unwrap();

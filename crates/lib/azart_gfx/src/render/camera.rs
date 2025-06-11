@@ -8,13 +8,13 @@ pub struct Camera {
 	pub fov: f32,
 }
 
-#[derive(Debug, Component)]
+#[derive(Default, Debug, Component)]
 pub struct XrCamera {
 	pub views: [XrView; 2],
 	pub ipd: f32,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct XrView {
 	pub pos: Vec3,
 	pub rot: Quat,

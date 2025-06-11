@@ -144,6 +144,7 @@ impl XrInstance {
 			(instance, exts)
 		};
 
+		// @TODO: This can fail if there's not a VR headset present. Detect this and abort VR play.
 		let hmd = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY).unwrap();
 		let context = Arc::new(GpuContext::new(vk_exts, Some((&instance, hmd))));
 
@@ -331,13 +332,13 @@ impl Drop for XrSpace {
 #[derive(Resource)]
 pub struct XrSwapchain {
 	name: DebugString,
-	context: Arc<GpuContext>,// Must be destroyed last.
+	cx: Arc<GpuContext>,// Must be destroyed last.
 	pub render_pass: Arc<RenderPass>,
 	pub handle: mem::ManuallyDrop<xr::Swapchain<xr::Vulkan>>,
 	pub frames: Box<[Frame]>,
 	pub swapchain_frame_buffers: Box<[SwapchainFrameBuffer]>,
 	pub current_frame_index: usize,
-	pub current_image_index: usize,
+	pub current_frame_buffer_index: usize,
 	pub resolution: UVec2,
 	pub format: Format,
 }
@@ -345,7 +346,7 @@ pub struct XrSwapchain {
 impl XrSwapchain {
 	pub fn new(
 		name: DebugString,
-		context: Arc<GpuContext>,
+		cx: Arc<GpuContext>,
 		render_pass: Arc<RenderPass>,
 		session: &XrSession,
 		desc: &XrSwapchainDesc,
@@ -445,12 +446,12 @@ impl XrSwapchain {
 							.layer_count(MULTIVIEW_ARRAY_COUNT)
 						);
 
-					unsafe { context.device.create_image_view(&create_info, None) }.expect("Failed to create image view!")
+					unsafe { cx.device.create_image_view(&create_info, None) }.expect("Failed to create image view!")
 				};
 
 				let msaa_color_attachment = match desc.msaa {
 					Msaa::None => None,
-					msaa => Some(Image::new(dbgfmt!("msaa_color_attachment[{i}]"), Arc::clone(&context), &ImageCreateInfo {
+					msaa => Some(Image::new(dbgfmt!("msaa_color_attachment[{i}]"), Arc::clone(&cx), &ImageCreateInfo {
 						resolution,
 						mip_count: MipCount::None,
 						format,
@@ -463,7 +464,7 @@ impl XrSwapchain {
 					})),
 				};
 
-				let depth_attachment = Image::new(dbgfmt!("depth_attachment[{i}]"), Arc::clone(&context), &ImageCreateInfo {
+				let depth_attachment = Image::new(dbgfmt!("depth_attachment[{i}]"), Arc::clone(&cx), &ImageCreateInfo {
 					resolution,
 					mip_count: MipCount::None,
 					format: DEPTH_FORMAT.into(),
@@ -497,14 +498,14 @@ impl XrSwapchain {
 						.attachments(for_both!(&attachments, a => a.as_slice()))
 						.layers(1);// Must be 1 even with multiview.
 
-					unsafe { context.device.create_framebuffer(&create_info, None) }.expect("Failed to create frame buffer!")
+					unsafe { cx.device.create_framebuffer(&create_info, None) }.expect("Failed to create frame buffer!")
 				};
 
 				#[cfg(debug_assertions)]
 				unsafe {
-					context.set_debug_name(format!("xr_swapchain_image[{i}]").as_str(), image);
-					context.set_debug_name(format!("xr_swapchain_image_view[{i}]").as_str(), image_view);
-					context.set_debug_name(format!("xr_swapchain_frame_buffer[{i}]").as_str(), frame_buffer);
+					cx.set_debug_name(format!("xr_swapchain_image[{i}]").as_str(), image);
+					cx.set_debug_name(format!("xr_swapchain_image_view[{i}]").as_str(), image_view);
+					cx.set_debug_name(format!("xr_swapchain_frame_buffer[{i}]").as_str(), frame_buffer);
 				}
 
 				SwapchainFrameBuffer {
@@ -525,24 +526,35 @@ impl XrSwapchain {
 					let create_info = vk::FenceCreateInfo::default()
 						.flags(vk::FenceCreateFlags::SIGNALED);
 
-					unsafe { context.device.create_fence(&create_info, None) }.unwrap()
+					unsafe { cx.device.create_fence(&create_info, None) }.unwrap()
 				};
 
 				let graphics_cmd_pool = {
 					let create_info = vk::CommandPoolCreateInfo::default()
-						.queue_family_index(context.queue_families.graphics);
+						.flags(vk::CommandPoolCreateFlags::TRANSIENT)
+						.queue_family_index(cx.queue_families.graphics);
 
-					unsafe { context.device.create_command_pool(&create_info, None) }.unwrap()
+					unsafe { cx.device.create_command_pool(&create_info, None) }.unwrap()
+				};
+
+				let graphics_cmd = {
+					let create_info = vk::CommandBufferAllocateInfo::default()
+						.level(vk::CommandBufferLevel::PRIMARY)
+						.command_pool(graphics_cmd_pool)
+						.command_buffer_count(1);
+
+					unsafe { cx.device.allocate_command_buffers(&create_info) }.unwrap()[0]
 				};
 
 				#[cfg(debug_assertions)]
 				unsafe {
-					context.set_debug_name(format!("frame_cmd_pool[{i}]").as_str(), graphics_cmd_pool);
-					context.set_debug_name(format!("frame_fence[{i}]").as_str(), fence);
+					cx.set_debug_name(format!("frame_cmd_pool[{i}]").as_str(), graphics_cmd_pool);
+					cx.set_debug_name(format!("frame_fence[{i}]").as_str(), fence);
 				}
 
 				Frame {
 					graphics_cmd_pool,
+					graphics_cmd,
 					in_flight_fence: fence,
 				}
 			})
@@ -550,13 +562,13 @@ impl XrSwapchain {
 
 		Self {
 			name,
-			context,
+			cx,
 			render_pass,
 			handle: mem::ManuallyDrop::new(swapchain),
 			frames,
 			swapchain_frame_buffers,
 			current_frame_index: 0,
-			current_image_index: 0,
+			current_frame_buffer_index: 0,
 			resolution,
 			format,
 		}
@@ -571,18 +583,23 @@ impl XrSwapchain {
 	pub fn format(&self) -> Format {
 		self.format
 	}
+
+	#[inline(always)]
+	pub fn frame_in_flight(&self) -> &Frame {
+		&self.frames[self.current_frame_index]
+	}
 }
 
 impl Drop for XrSwapchain {
 	fn drop(&mut self) {
 		// Wait for GPU to go idle before destroying this.
 		// Very expensive but this shouldn't happen often.
-		self.context.wait_idle();
+		self.cx.wait_idle();
 
 		for frame in self.frames.iter() {
 			unsafe {
-				self.context.device.destroy_fence(frame.in_flight_fence, None);
-				self.context.device.destroy_command_pool(frame.graphics_cmd_pool, None);
+				self.cx.device.destroy_fence(frame.in_flight_fence, None);
+				self.cx.device.destroy_command_pool(frame.graphics_cmd_pool, None);
 			}
 		}
 
@@ -590,8 +607,8 @@ impl Drop for XrSwapchain {
 			unsafe {
 				drop(frame_buffer.msaa_color_attachment.take());
 				mem::ManuallyDrop::drop(&mut frame_buffer.depth_attachment);
-				self.context.device.destroy_image_view(frame_buffer.image_view, None);
-				self.context.device.destroy_framebuffer(frame_buffer.frame_buffer, None);
+				self.cx.device.destroy_image_view(frame_buffer.image_view, None);
+				self.cx.device.destroy_framebuffer(frame_buffer.frame_buffer, None);
 			}
 		}
 
@@ -612,6 +629,7 @@ pub struct XrSwapchainDesc {
 
 pub struct Frame {
 	pub graphics_cmd_pool: vk::CommandPool,
+	pub graphics_cmd: vk::CommandBuffer,
 	pub in_flight_fence: vk::Fence,
 }
 
