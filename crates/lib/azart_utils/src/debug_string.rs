@@ -33,6 +33,12 @@ impl From<&'static str> for DebugString {
 	}
 }
 
+impl From<String> for DebugString {
+  fn from(value: String) -> Self {
+    Self::_new(value.into())
+  }
+}
+
 impl Default for DebugString {
 	fn default() -> Self {
 		Self {

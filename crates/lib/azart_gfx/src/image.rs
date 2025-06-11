@@ -1,15 +1,20 @@
 use std::mem::ManuallyDrop;
 use std::num::NonZero;
+use std::ptr::copy_nonoverlapping;
 use std::sync::Arc;
 use ash::vk;
 use bevy::math::UVec2;
+use derivative::Derivative;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
+use serde::{Deserialize, Serialize};
 use crate::GpuContext;
 use azart_gfx_utils::{Msaa, GpuResource, Format};
 use azart_utils::debug_string::DebugString;
-use bevy::reflect::Reflect;
+use bevy::reflect::{Reflect, TypePath};
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Image {
 	name: DebugString,
 	pub(crate) handle: vk::Image,
@@ -22,13 +27,14 @@ pub struct Image {
 	pub(crate) usage: vk::ImageUsageFlags,
 	pub(crate) layout: vk::ImageLayout,
 	pub(crate) msaa: Msaa,
-	context: Arc<GpuContext>,
+	#[derivative(Debug = "ignore")]
+	cx: Arc<GpuContext>,
 }
 
 impl Image {
 	pub fn new(
 		name: DebugString,
-		context: Arc<GpuContext>,
+		cx: Arc<GpuContext>,
 		create_info: &ImageCreateInfo,
 	) -> Self {
 		assert!(create_info.resolution.x > 0 && create_info.resolution.y > 0, "Resolution was {:?}! Must be greater than 0!", create_info.resolution);
@@ -43,7 +49,7 @@ impl Image {
 
 		let image = {
 			assert!(
-				!matches!(unsafe { context.instance.get_physical_device_image_format_properties(context.physical_device, create_info.format.into(), vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, vk::ImageCreateFlags::empty()) },
+				!matches!(unsafe { cx.instance.get_physical_device_image_format_properties(cx.physical_device, create_info.format.into(), vk::ImageType::TYPE_2D, create_info.tiling, create_info.usage, vk::ImageCreateFlags::empty()) },
 				Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED)),
 				"Image \"{name}\" is not supported with: {:?}", create_info,
 			);
@@ -65,7 +71,7 @@ impl Image {
 				.sharing_mode(vk::SharingMode::EXCLUSIVE)
 				.initial_layout(create_info.initial_layout);
 
-			unsafe { context.device.create_image(&create_info, None) }.expect("failed to create image!")
+			unsafe { cx.device.create_image(&create_info, None) }.expect("failed to create image!")
 		};
 
 		let allocation = {
@@ -77,7 +83,7 @@ impl Image {
 				let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
 				requirements.push_next(&mut dedicated_requirements);
 
-				unsafe { context.device.get_image_memory_requirements2(&info, &mut requirements); }
+				unsafe { cx.device.get_image_memory_requirements2(&info, &mut requirements); }
 				(requirements.memory_requirements, dedicated_requirements.prefers_dedicated_allocation == vk::TRUE)
 			};
 
@@ -94,10 +100,10 @@ impl Image {
 				allocation_scheme,
 			};
 
-			context.alloc(&create_info)
+			cx.alloc(&create_info)
 		};
 
-		unsafe { context.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }.expect("failed to bind image memory!");
+		unsafe { cx.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }.expect("failed to bind image memory!");
 
 		let image_view = {
 			let create_info = vk::ImageViewCreateInfo::default()
@@ -116,13 +122,13 @@ impl Image {
 					.layer_count(create_info.layers)
 				);
 
-			unsafe { context.device.create_image_view(&create_info, None) }.expect("failed to create image view!")
+			unsafe { cx.device.create_image_view(&create_info, None) }.expect("failed to create image view!")
 		};
-		
+
 		#[cfg(debug_assertions)]
 		unsafe {
-			context.set_debug_name(name.as_str(), image);
-			context.set_debug_name(format!("{name}_view").as_str(), image_view);
+			cx.set_debug_name(name.as_str(), image);
+			cx.set_debug_name(format!("{name}_view").as_str(), image_view);
 		}
 
 		Self {
@@ -137,10 +143,10 @@ impl Image {
 			usage: create_info.usage,
 			layout: create_info.initial_layout,
 			msaa: create_info.msaa,
-			context,
+			cx,
 		}
 	}
-	
+
 	#[inline(always)]
 	pub fn name(&self) -> &DebugString {
 		&self.name
@@ -160,14 +166,12 @@ impl Image {
 impl Drop for Image {
 	fn drop(&mut self) {
 		unsafe {
-			self.context.device.destroy_image_view(self.view, None);
-			self.context.dealloc(ManuallyDrop::take(&mut self.allocation));
-			self.context.device.destroy_image(self.handle, None);
+			self.cx.device.destroy_image_view(self.view, None);
+			self.cx.dealloc(ManuallyDrop::take(&mut self.allocation));
+			self.cx.device.destroy_image(self.handle, None);
 		}
 	}
 }
-
-impl GpuResource for Image {}
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ImageCreateInfo {
@@ -198,10 +202,76 @@ impl Default for ImageCreateInfo {
 	}
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq, Hash, Debug, Reflect)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, Hash, Debug, Reflect, Serialize, Deserialize)]
 pub enum MipCount {
+  /// No mips.
 	#[default]
-	None,// No mips.
-	Max,// Max mips based on resolution.
-	Custom(u32),// User-defined will be clamped from 1..Max.
+	None,
+	/// Max mips based on resolution.
+	Max,
+	/// User-defined will be clamped from 1..Max.
+	Custom(u32),
+}
+
+pub struct ImageAssetHandler {
+  cx: Arc<GpuContext>,
+}
+
+impl ImageAssetHandler {
+  #[inline]
+  pub const fn new(cx: Arc<GpuContext>) -> Self {
+    Self { cx }
+  }
+}
+
+impl azart_asset::AssetHandler for ImageAssetHandler {
+  type Target = Image;
+
+  fn load(&self, data: &[u8]) -> std::io::Result<Self::Target> {
+    use azart_asset::bincode;
+    use std::io::Error;
+
+    let SerdeImage { name, resolution, format, mips: src_mips } = bincode::serde::borrow_decode_from_slice(data, bincode::config::standard()).map_err(Error::other)?.0;
+
+    let image = Image::new(
+      name.to_owned().into(),
+      Arc::clone(&self.cx),
+      &ImageCreateInfo {
+        resolution,
+        mip_count: MipCount::Custom(src_mips.len() as _),
+        format,
+        ..Default::default()
+      },
+    );
+
+    self
+      .cx
+      .upload_image(
+        &image,
+        Some(0..src_mips.len() as _),
+        |dst_mips| {
+          assert_eq!(src_mips.len(), dst_mips.len());
+          src_mips
+            .iter()
+            .zip(dst_mips.iter_mut())
+            .for_each(|(src_mip, dst_mip)| dst_mip.copy_from_slice(src_mip))
+        }
+      );
+
+    Ok(image)
+  }
+
+  fn store(&self, value: &Self::Target) -> std::io::Result<Vec<u8>> {
+    unimplemented!("Implement store! Unimplemented at the moment. Need to add a download_image function to context!");
+  }
+}
+
+/// The intermediate representation of an Image when serializing / deserializing. Use bincode.
+#[derive(Serialize, Deserialize)]
+#[serde(rename = "Image")]
+pub struct SerdeImage<'a> {
+  pub name: &'a str,
+  pub resolution: UVec2,
+  pub format: Format,
+  pub mips: Vec<&'a [u8]>,
 }

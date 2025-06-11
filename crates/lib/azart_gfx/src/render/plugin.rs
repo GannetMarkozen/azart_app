@@ -10,10 +10,11 @@ use crate::render_settings::{DisplayMode, RenderSettings};
 use crate::render::xr::*;
 use ash::vk;
 use ash::vk::Handle;
+use azart_asset::{AssetCache, Asset, DefaultAssetHandler, AssetResource};
 use azart_gfx_utils::{shader_path, Format, Msaa, TriangleFillMode};
 use azart_utils::debug_string::DebugString;
 use azart_utils::io;
-use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
+use bevy::tasks::{block_on, ComputeTaskPool, ParallelSliceMut};
 use bevy::window::{PresentMode, PrimaryWindow};
 use bevy::winit::{WakeUp, WinitWindows};
 use either::{for_both, Either};
@@ -25,7 +26,9 @@ use winit::event_loop::EventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, HasRawWindowHandle, HasWindowHandle};
 use vk_sync::{AccessType, ImageBarrier, ImageLayout};
 use crate::buffer::{Buffer, BufferCreateInfo};
+use crate::glb::{Indices, Scene};
 use crate::graphics_pipeline::{GraphicsPipeline, GraphicsPipelineCreateInfo, VertexAttribute, VertexInput};
+use crate::pbr::mesh::{Material, Mesh, MeshAssetHandler};
 use crate::render::base_pass::record_base_pass;
 use crate::render::swapchain::{Swapchain, SwapchainDesc};
 use crate::render_pass::RenderPass;
@@ -42,6 +45,11 @@ impl Default for RenderPlugin {
 	fn default() -> Self {
 		Self {
 			settings: default(),
+			#[cfg(not(target_os = "android"))]
+			display_mode: DisplayMode::Std,
+			/// Force DisplayMode::Xr on Android.
+			/// @TODO: Detect whether VR is enabled or not and automatically decide.
+			#[cfg(target_os = "android")]
 			display_mode: DisplayMode::Xr,
 		}
 	}
@@ -49,6 +57,9 @@ impl Default for RenderPlugin {
 
 impl Plugin for RenderPlugin {
 	fn build(&self, app: &mut App) {
+	  use azart_asset::RegisterAssetPlugin;
+		use crate::ImageAssetHandler;
+
 		let mut settings = self.settings.clone();
 
 		let event_loop = app.world().non_send_resource::<EventLoop<WakeUp>>();
@@ -58,7 +69,7 @@ impl Plugin for RenderPlugin {
 			.map(|&ext| unsafe { CStr::from_ptr(ext) })
 			.collect::<Vec<_>>();
 
-		let context = match self.display_mode {
+		let cx = match self.display_mode {
 			DisplayMode::Std => Arc::new(GpuContext::new(&swapchain_exts, None)),
 			DisplayMode::Xr => {
 				let instance = XrInstance::new(&swapchain_exts);
@@ -77,8 +88,14 @@ impl Plugin for RenderPlugin {
 		};
 
 		app
-			.insert_resource(GpuContextHandle(context))
+			.insert_resource(GpuContextHandle(Arc::clone(&cx)))
 			.insert_resource(settings)
+			// Register Image asset handling plugin.
+			.add_plugins((
+				RegisterAssetPlugin::with_handler(MeshAssetHandler::new(Arc::clone(&cx))),
+				RegisterAssetPlugin::with_handler(ImageAssetHandler::new(Arc::clone(&cx))),
+				RegisterAssetPlugin::with_handler(DefaultAssetHandler::<Material>::default()),
+			))
 			.insert_state(self.display_mode)
 			.insert_state(XrState::Idle)
 			.add_systems(
@@ -218,8 +235,8 @@ pub struct BasePass(pub Arc<RenderPass>);
 #[derive(Resource)]
 pub struct Sampler {
 	name: DebugString,
-	pub handle: vk::Sampler,
 	context: Arc<GpuContext>,
+	pub handle: vk::Sampler,
 }
 
 impl Sampler {
@@ -230,15 +247,17 @@ impl Sampler {
 	) -> Self {
 		let sampler = unsafe {
 			let sampler = context.device.create_sampler(create_info, None).expect("Failed to create sampler!");
+
 			#[cfg(debug_assertions)]
 			context.set_debug_name(name.as_str(), sampler);
+
 			sampler
 		};
 
 		Self {
 			name,
-			handle: sampler,
 			context,
+			handle: sampler,
 		}
 	}
 }
@@ -255,7 +274,7 @@ impl Drop for Sampler {
 pub struct RenderDoc(pub renderdoc::RenderDoc<renderdoc::V110>);
 
 #[must_use]
-#[inline]
+#[inline(always)]
 pub const fn align_to(value: usize, alignment: usize) -> usize {
 	(value + alignment - 1) & !(alignment - 1)
 }
@@ -473,34 +492,129 @@ fn create_swapchain_on_window_spawned(
 fn create_global_resources(
 	mut commands: Commands,
 	base_pass: Res<BasePass>,
-	context: Res<GpuContextHandle>,
+	cx: Res<GpuContextHandle>,
 	display_mode: Res<State<DisplayMode>>,
 	settings: Res<RenderSettings>,
+	cache: Res<AssetCache>,
 ) {
-	let pbr_pipeline = PbrPipeline(GraphicsPipeline::new("pbr_pipeline".into(), Arc::clone(&context), base_pass.handle, &GraphicsPipelineCreateInfo {
-		vertex_shader: &shader_path("shader.vert"),
-		fragment_shader: &shader_path("shader.frag"),
-		vertex_inputs: &[
-			VertexInput {
-				stride: size_of::<Vertex>() as _,
-				attributes: &[
-					VertexAttribute {
-						name: "pos",
-						offset: offset_of!(Vertex, pos) as _,
-					},
-					VertexAttribute {
-						name: "uv",
-						offset: offset_of!(Vertex, uv) as _,
-					},
-				],
-			},
-		],
-		msaa: settings.msaa,
-		fill_mode: TriangleFillMode::Fill,
-	}));
+	let asset: Asset<Mesh> = block_on(cache.load("assets/corset/pCube49.mesh")).expect("Failed to load pCube49!");
+	println!("ASSET: {asset:?}");
+	println!("base_color: {:?}", &*asset.material.base_color);
+
+	let pbr_pipeline = PbrPipeline(GraphicsPipeline::new(
+		"pbr_pipeline".into(),
+		Arc::clone(&cx),
+		base_pass.handle,
+		&GraphicsPipelineCreateInfo {
+			vertex_shader: &shader_path("shader.vert"),
+			fragment_shader: &shader_path("shader.frag"),
+			vertex_inputs: &[
+				VertexInput {
+					stride: size_of::<Vertex>() as _,
+					attributes: &[
+						VertexAttribute {
+							name: "pos",
+							offset: offset_of!(Vertex, pos) as _,
+						},
+						VertexAttribute {
+							name: "uv",
+							offset: offset_of!(Vertex, uv) as _,
+						},
+					],
+				},
+			],
+			msaa: settings.msaa,
+			fill_mode: TriangleFillMode::Fill,
+		},
+	));
+
+	const ASSET_PATH: &str = "assets/models/Corset/glTF/Corset.gltf";
+
+	let path = io::data_path().join(ASSET_PATH);
+
+	for entry in io::read_dir("assets/models/Corset/glTF").expect("Failed to read dir!").iter() {
+		println!("Entry: {entry:?}");
+		let data = io::read(entry).unwrap_or_else(|e| panic!("Failed to read {entry:?}!: {e}"));
+		io::write(entry, &data).unwrap_or_else(|e| panic!("Failed to write {entry:?}!: {e}"));
+	}
+
+	let mut scene = Scene::load(&path).expect("Failed to load gltf!");
 
 	let mesh = {
-		let index_buffer = Buffer::new("cube_index_buffer".into(), Arc::clone(&context), &BufferCreateInfo {
+		let mesh = &scene.meshes[0];
+
+		let index_buffer = Buffer::new(
+			"cube_index_buffer".into(),
+			Arc::clone(&cx),
+			&BufferCreateInfo {
+				size: match &mesh.indices {
+					Indices::U8(indices) => indices.len() * size_of::<u8>(),
+					Indices::U16(indices) => indices.len() * size_of::<u16>(),
+					Indices::U32(indices) => indices.len() * size_of::<u32>(),
+				},
+				usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+				memory: MemoryLocation::GpuOnly,
+			},
+		);
+
+		let vertex_buffer = Buffer::new(
+			"cube_vertex_buffer".into(),
+			Arc::clone(&cx),
+			&BufferCreateInfo {
+				size: mesh.positions.len() * size_of::<Vertex>(),
+				usage: vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+				memory: MemoryLocation::GpuOnly,
+			},
+		);
+
+		cx.upload_buffer(&index_buffer, |dst| unsafe {
+			let dst = dst.as_mut_ptr();
+			let (src, size) = match &mesh.indices {
+				Indices::U8(indices) => (indices.as_ptr(), indices.len()),
+				Indices::U16(indices) => (indices.as_ptr() as *const u8, indices.len() * size_of::<u16>()),
+				Indices::U32(indices) => (indices.as_ptr() as *const u8, indices.len() * size_of::<u32>()),
+			};
+
+			std::ptr::copy_nonoverlapping(src, dst, size);
+		});
+
+		cx.upload_buffer(&vertex_buffer, |dst| unsafe {
+			/*let dst = dst.as_mut_ptr();
+			let src = mesh.positions.as_ptr() as *const u8;
+			let size = mesh.positions.len() * size_of::<[f32; 3]>();
+
+			std::ptr::copy_nonoverlapping(src, dst, size);*/
+
+			let positions = &mesh.positions;
+			let dst = slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut Vertex, mesh.positions.len());
+
+			let transform_pos = |pos: [f32; 3]| {
+			  let mut pos = pos.map(|x| x * 20.0);
+				pos[1] -= 2.5;
+				pos
+			};
+
+			if let Some(uvs) = &mesh.uvs {
+				assert_eq!(positions.len(), uvs.len());
+
+				dst
+					.iter_mut()
+					.zip(positions.iter().zip(uvs.iter()))
+					.for_each(|(dst, (&pos, &uv))| *dst = Vertex { pos: transform_pos(pos), uv });
+			} else {
+				dst
+					.iter_mut()
+					.zip(positions.iter())
+					.for_each(|(dst, &pos)| *dst = Vertex { pos: transform_pos(pos), uv: [0.0, 0.0] });
+			}
+		});
+
+		CubeMesh {
+			index_buffer,
+			vertex_buffer,
+		}
+
+		/*let index_buffer = Buffer::new("cube_index_buffer".into(), Arc::clone(&context), &BufferCreateInfo {
 			size: size_of_val(&CUBE_INDICES),
 			usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
 			memory: MemoryLocation::GpuOnly,
@@ -523,22 +637,24 @@ fn create_global_resources(
 		CubeMesh {
 			index_buffer,
 			vertex_buffer,
-		}
+		}*/
 	};
 
-	let view_matrices_buffer = ViewMatricesBuffer(Buffer::new("view_matrices".into(), Arc::clone(&context), &BufferCreateInfo {
-		size: size_of::<ViewMatrices>() * settings.frames_in_flight + (align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_alignment) * (settings.frames_in_flight - 1)),
+	let view_matrices_buffer = ViewMatricesBuffer(Buffer::new("view_matrices".into(), Arc::clone(&cx), &BufferCreateInfo {
+		size: size_of::<ViewMatrices>() * settings.frames_in_flight + (align_to(size_of::<ViewMatrices>(), cx.limits.ubo_min_align) * (settings.frames_in_flight - 1)),
 		usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
 		memory: MemoryLocation::CpuToGpu,
 	}));
 
 	let texture = {
-		let path = Path::new("assets/models/chom/chom_festive.jpg");
+		/*let path = Path::new("assets/models/chom/chom_festive.jpg");
 
 		let image_data = {
 			let buffer = io::read(path).unwrap();
 			image::load_from_memory(&buffer).unwrap()
-		};
+		};*/
+
+		let image_data = scene.textures.drain(..).next().unwrap();
 
 		let create_info = ImageCreateInfo {
 			resolution: UVec2::new(image_data.width(), image_data.height()),
@@ -549,9 +665,9 @@ fn create_global_resources(
 			..default()
 		};
 
-		let image = Image::new("texture".into(), Arc::clone(&context), &create_info);
+		let image = Image::new("texture".into(), Arc::clone(&cx), &create_info);
 
-		context.upload_image(&image, None, |mips| {
+		cx.upload_image(&image, None, |mips| {
 			// Create first mip.
 			image_data
 				.pixels()
@@ -595,7 +711,7 @@ fn create_global_resources(
 		Texture(image)
 	};
 
-	let sampler = Sampler::new("sampler".into(), Arc::clone(&context), &vk::SamplerCreateInfo::default()
+	let sampler = Sampler::new("sampler".into(), Arc::clone(&cx), &vk::SamplerCreateInfo::default()
 		.mag_filter(vk::Filter::LINEAR) // Smooth magnification
 		.min_filter(vk::Filter::LINEAR) // Smooth minification
 		.mipmap_mode(vk::SamplerMipmapMode::LINEAR) // Trilinear filtering
@@ -660,13 +776,22 @@ fn poll_xr_events(
 				}
 
 				println!("STATE CHANGED FROM {:?} TO {:?}", *previous_state, state.state());
-
 				*previous_state = state.state();
 			},
 			_ => info!("UNKNOWN EVENT!"),
 		}
 	}
 }
+
+fn begin_record_base_pass(
+	mut commands: Commands,
+	cx: Res<GpuContextHandle>,
+	display_mode: DisplayMode,
+	settings: Res<RenderSettings>,
+) {
+
+}
+
 
 fn render(
 	context: Res<GpuContextHandle>,
@@ -715,9 +840,9 @@ fn render(
 
 		// Update view matrices.
 		unsafe {
-			let data = view_matrices.allocation.mapped_ptr().unwrap().as_ptr().offset((align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_alignment) * frame_index) as _) as *mut ViewMatrices;
+			let data = view_matrices.allocation.mapped_ptr().unwrap().as_ptr().offset((align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_align) * frame_index) as _) as *mut ViewMatrices;
 
-			let model = Mat4::IDENTITY;
+			let model = Mat4::from_rotation_y(time.elapsed_secs() * std::f32::consts::PI * 0.5);
 			let view = Mat4::look_at_rh(Vec3::new(5.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
 			let mut proj = Mat4::perspective_rh(45_f32.to_radians(), swapchain.resolution.x as f32 / swapchain.resolution.y as f32, Z_NEAR, Z_FAR);
 			proj.y_axis.y *= -1.0;
@@ -730,14 +855,17 @@ fn render(
 		}
 
 		let cmd = unsafe {
-			let cmd = {
+			/*let cmd = {
 				context.device.reset_command_pool(frame.graphics_cmd_pool, vk::CommandPoolResetFlags::empty()).unwrap();
 				context.device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default()
 					.command_pool(frame.graphics_cmd_pool)
 					.command_buffer_count(1)
 					.level(vk::CommandBufferLevel::PRIMARY)
 				).expect("Failed to allocate command buffer!")[0]
-			};
+			};*/
+
+			context.device.reset_command_pool(frame.graphics_cmd_pool, vk::CommandPoolResetFlags::empty()).unwrap();
+			let cmd = frame.graphics_cmd;
 
 			context.device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
 
@@ -868,9 +996,9 @@ fn render_xr(
 
 	// Update view matrices.
 	unsafe {
-		let data = view_matrices.allocation.mapped_ptr().unwrap().as_ptr().offset((align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_alignment) * frame_index) as _) as *mut ViewMatrices;
+		let data = view_matrices.allocation.mapped_ptr().unwrap().as_ptr().offset((align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_align) * frame_index) as _) as *mut ViewMatrices;
 
-		let model_matrix = Mat4::IDENTITY;
+		let model_matrix = Mat4::from_rotation_y(time.elapsed_secs() * std::f32::consts::PI * 0.5);
 		let view_matrices = views.map(|xr::View { pose: xr::Posef { position, orientation }, .. }| {
 			let translation = Vec3::new(position.x, position.y, position.z);
 			let rotation = Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w);

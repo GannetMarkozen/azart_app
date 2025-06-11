@@ -11,11 +11,14 @@ name = "azart_app"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+async-trait = "0.1.88"
+async_serde = "0.1.0"
 azart = { path = "crates/lib/azart" }
-bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded", "android-native-activity"] }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "multi_threaded", "android-native-activity"] }
 color-eyre = { version = "0.6.3" }
-tracing-subscriber = "0.3.19"
-tracing = "0.1.41"
+serde = "1.0.219"
+smallvec = "1.15.0"
+toml = "0.8.22"
 
 [build-dependencies]
 azart = { path = "crates/lib/azart" }
@@ -97,9 +100,9 @@ name = "com.oculus.permission.HAND_TRACKING"
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
 categories = [
-    "com.oculus.intent.category.VR",
-    "android.intent.category.LAUNCHER",
-    "org.khronos.openxr.intent.category.IMMERSIVE_HMD",
+  "com.oculus.intent.category.VR",
+  "android.intent.category.LAUNCHER",
+  "org.khronos.openxr.intent.category.IMMERSIVE_HMD",
 ]
 
 [package.metadata.android.signing.release]

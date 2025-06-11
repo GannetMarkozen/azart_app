@@ -1,3 +1,6 @@
 /target
 /assets/spv
 /.idea
+/.lapce
+/.vs
+/crates/lib/azart_task

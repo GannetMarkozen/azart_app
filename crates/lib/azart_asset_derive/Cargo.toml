@@ -1,0 +1,14 @@
+[package]
+name = "azart_asset_derive"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+azart_asset = { path = "../azart_asset" }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "multi_threaded"] }
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[lib]
+proc-macro = true

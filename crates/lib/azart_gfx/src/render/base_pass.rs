@@ -2,10 +2,106 @@ use std::sync::Arc;
 use ash::vk;
 use azart_gfx_utils::Msaa;
 use bevy::math::UVec2;
+use bevy::prelude::*;
 use either::{for_both, Either};
-use crate::{rhi_label, GpuContext};
+use crate::{rhi_label, GpuContext, GpuContextHandle};
+use crate::buffer::Buffer;
 use crate::graphics_pipeline::GraphicsPipeline;
+use crate::render::camera::{Camera, XrCamera, XrView};
 use crate::render::plugin::{align_to, CubeMesh, Sampler, Texture, ViewMatrices, ViewMatricesBuffer};
+use crate::render::xr::{XrSession, XrSpace};
+use openxr as xr;
+use crate::render::gpu_scene::{GlobalUbo, GpuScene, RenderFrameIndex};
+use crate::render::swapchain::Swapchain;
+use crate::render_settings::RenderSettings;
+
+#[derive(Resource, Deref, DerefMut)]
+pub(crate) struct XrFrameState(pub(crate) xr::FrameState);
+
+pub fn update_xr_camera_transform(
+	mut cameras: Query<&mut XrCamera>,
+	session: Res<XrSession>,
+	frame_state: Res<XrFrameState>,
+	space: Res<XrSpace>,
+) {
+	let Ok(mut camera) = cameras.get_single_mut() else {
+		return;
+	};
+
+	let (view_flags, views) = session.locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, frame_state.predicted_display_time, &*space).unwrap();
+	let views: [_; 2] = views.try_into().unwrap_or_else(|views: Vec<xr::View>| panic!("There are {} views instead of the presumed 2!", views.len()));
+
+	camera.views = views.map(|xr::View { pose: xr::Posef { position: pos, orientation: rot }, fov }| {
+		let pos = Vec3::new(pos.x, pos.y, pos.z);
+		let rot = Quat::from_xyzw(rot.x, rot.y, rot.z, rot.w);
+
+		XrView {
+			pos,
+			rot,
+			fov,
+		}
+	});
+}
+
+pub fn update_global_ubo_xr(
+	cx: Res<GpuContextHandle>,
+	mut cameras: Query<(&Transform, &mut XrCamera)>,
+	mut scene: ResMut<GpuScene>,
+	frame_index: Res<RenderFrameIndex>,
+	settings: Res<RenderSettings>,
+) {
+	let Ok((transform, mut camera)) = cameras.get_single_mut() else {
+		return;
+	};
+
+	unsafe {
+		const Z_FAR: f32 = 1000.0;
+		const Z_NEAR: f32 = 0.025;
+
+		let data = scene.global_ubo.allocation.mapped_ptr().unwrap().cast::<u8>();
+		let ubo = data.add(align_to(size_of::<GlobalUbo>(), cx.limits.ubo_min_align) * (frame_index.0 % (settings.frames_in_flight as u64)) as usize).cast::<GlobalUbo>().as_mut();
+		ubo.views = camera.views.map(|XrView { pos, rot, fov: xr::Fovf { angle_right: r, angle_left: l, angle_up: u, angle_down: d } }| {
+			// world -> eye
+			let view = (transform.compute_matrix() * Mat4::from_rotation_translation(rot, pos)).inverse();
+
+			let (r, l, u, d) = (r.tan(), l.tan(), u.tan(), d.tan());
+			let (w, h) = (r - l, d - u);
+
+			let proj = Mat4::from_cols_array_2d(&[
+				[2.0 / w, 0.0, 0.0, 0.0],
+				[0.0, 2.0 / h, 0.0, 0.0],
+				[(r + l) / w, (u + d) / h, -(Z_FAR + Z_NEAR) / (Z_FAR - Z_NEAR), -1.0],
+				[0.0, 0.0, -(Z_FAR * (Z_NEAR + Z_NEAR)) / (Z_FAR - Z_NEAR), 0.0],
+			]);
+
+			proj * view
+		});
+	}
+}
+
+pub fn update_global_ubo(
+	cx: Res<GpuContextHandle>,
+	mut cameras: Query<(&Transform, &Camera)>,
+	mut scene: ResMut<GpuScene>,
+	swapchain: Query<&Swapchain>,
+	frame_index: Res<RenderFrameIndex>,
+	settings: Res<RenderSettings>,
+) {
+	let (Ok((transform, camera)), Ok(swapchain)) = (cameras.get_single(), swapchain.get_single()) else {
+		return;
+	};
+
+	unsafe {
+		const Z_FAR: f32 = 1000.0;
+		const Z_NEAR: f32 = 0.025;
+
+		let data = scene.global_ubo.allocation.mapped_ptr().unwrap().cast::<u8>();
+		let ubo = data.add(align_to(size_of::<GlobalUbo>(), cx.limits.ubo_min_align) * (frame_index.0 % (settings.frames_in_flight as u64)) as usize).cast::<GlobalUbo>().as_mut();
+		let mut proj = Mat4::perspective_rh(camera.fov.to_radians(), swapchain.resolution.x as f32 / swapchain.resolution.y as f32, Z_NEAR, Z_FAR);
+		proj.y_axis.y *= -1.0;// Vulkan has inverted Y compared to OpenGL.
+		ubo.views[0] = proj * transform.compute_matrix().inverse();
+	}
+}
 
 pub fn record_base_pass(
 	context: &Arc<GpuContext>,
@@ -154,7 +250,7 @@ pub fn record_base_pass(
 					.descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
 					.buffer_info(&[vk::DescriptorBufferInfo::default()
 						.buffer(view_matrices.handle)
-						.offset((align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_alignment) * frame_index) as _)
+						.offset((align_to(size_of::<ViewMatrices>(), context.limits.ubo_min_align) * frame_index) as _)
 						.range(size_of::<ViewMatrices>() as _)
 					]),
 				vk::WriteDescriptorSet::default()
@@ -178,7 +274,11 @@ pub fn record_base_pass(
 			cmd,
 			mesh.index_buffer.handle,
 			0,
-			vk::IndexType::UINT16,
+			if mesh.index_buffer.size() > u16::MAX as usize * size_of::<u16>() {
+			  vk::IndexType::UINT32
+			} else {
+			  vk::IndexType::UINT16
+			},
 		);
 
 		device.cmd_bind_vertex_buffers(
@@ -190,8 +290,8 @@ pub fn record_base_pass(
 
 		device.cmd_draw_indexed(
 			cmd,
-			36,
-			2,
+			(mesh.index_buffer.size() / size_of::<u32>()) as u32,
+			1,
 			0,
 			0,
 			0,

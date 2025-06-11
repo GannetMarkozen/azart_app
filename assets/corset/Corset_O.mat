@@ -1,0 +1,7 @@
+azart_gfx::pbr::mesh::Material
+base_color:
+  path: assets\corset\Corset_baseColor.image
+normals:
+  path: assets\corset\Corset_normal.image
+metallic_roughness:
+  path: assets\corset\Corset_occlusionRoughnessMetallic.image

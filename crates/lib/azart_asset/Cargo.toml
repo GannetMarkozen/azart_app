@@ -1,0 +1,21 @@
+[package]
+name = "azart_asset"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+azart_utils = { path = "../azart_utils" }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "multi_threaded"] }
+either = "*"
+futures = "0.3.31"
+serde = { version = "*", features = ["derive"] }
+serde_bytes = "*"
+ron = "*"
+toml = "0.8.22"
+serde_yaml = "0.9.34"
+serde_json = "*"
+bincode = { version = "*", features = ["serde"] }
+crossbeam = "*"
+memchr = "2.7"
+scopeguard = "1.2.0"
+pretty-type-name = "1.0.1"

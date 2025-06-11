@@ -1,0 +1,19 @@
+[package]
+name = "compile_gltf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+azart = { path = "../../crates/lib/azart" }
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+anyhow = "1"
+gltf = "1.4.1"
+image = "0.25.6"
+serde = "1.0.219"
+
+[profile.release.package."spirv-reflect"]
+debug-assertions = false # Crashes.
+
+[profile.dev.package."spirv-reflect"]
+debug-assertions = false # Crashes.

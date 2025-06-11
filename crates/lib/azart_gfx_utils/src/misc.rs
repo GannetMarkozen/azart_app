@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
 use ash::vk;
 use bevy::prelude::*;
+use serde::{Serialize, Deserialize};
 
 pub trait GpuResource {}
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Reflect)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Reflect, Serialize, Deserialize)]
 pub enum Format {
 	Undefined = vk::Format::UNDEFINED.as_raw() as u8,
 	RgU4Norm = 1,
@@ -383,7 +384,7 @@ impl Msaa {
 			Msaa::x8 => 8,
 		}
 	}
-	
+
 	#[inline(always)]
 	pub const fn as_vk_sample_count(&self) -> vk::SampleCountFlags {
 		match self {

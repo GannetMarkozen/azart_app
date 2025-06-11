@@ -1,18 +1,25 @@
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use ash::vk;
+use azart_asset::{bincode, AssetHandler};
 use gpu_allocator::vulkan::{Allocation, AllocationScheme};
 use crate::GpuContext;
 use azart_utils::debug_string::DebugString;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
 use azart_gfx_utils::GpuResource;
+use derivative::Derivative;
+use serde::{Deserialize, Deserializer, Serialize};
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Buffer {
 	pub(crate) name: DebugString,
 	pub(crate) handle: vk::Buffer,
+	#[derivative(Debug = "ignore")]
 	pub(crate) allocation: ManuallyDrop<Allocation>,
 	size: usize,
+	#[derivative(Debug = "ignore")]
 	pub(crate) context: Arc<GpuContext>,
 }
 
@@ -125,5 +132,54 @@ impl Default for BufferCreateInfo {
 			usage: vk::BufferUsageFlags::empty(),
 			memory: MemoryLocation::GpuOnly,
 		}
+	}
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SerdeBuffer<'a> {
+	name: &'a str,
+	data: &'a [u8],
+}
+
+pub struct BufferAssetHandler {
+	cx: Arc<GpuContext>,
+}
+
+impl BufferAssetHandler {
+	#[inline]
+	pub const fn new(cx: Arc<GpuContext>) -> Self {
+		Self { cx }
+	}
+}
+
+impl AssetHandler for BufferAssetHandler {
+	type Target = Buffer;
+
+	fn load(&self, data: &[u8]) -> std::io::Result<Self::Target> {
+		use std::io::Error;
+
+		let SerdeBuffer { name, data: src } = bincode::serde::borrow_decode_from_slice(data, bincode::config::standard()).map_err(Error::other)?.0;
+
+		let buffer = Buffer::new(
+			name.to_owned().into(),
+			Arc::clone(&self.cx),
+			&BufferCreateInfo {
+				size: data.len(),
+				..Default::default()
+			}
+		);
+
+		self
+			.cx
+			.upload_buffer(
+				&buffer,
+				|dst| dst.copy_from_slice(src),
+			);
+
+		Ok(buffer)
+	}
+
+	fn store(&self, value: &Self::Target) -> std::io::Result<Vec<u8>> {
+		unimplemented!();
 	}
 }

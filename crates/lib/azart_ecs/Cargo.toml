@@ -1,0 +1,10 @@
+[package]
+name = "azart_ecs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+azart_task = { path = "../azart_task" }
+lazy_static = "1.5.0"
+hibitset = { version = "0.6.4", default-features = false }
+smallvec = { version = "1.15.0", features = ["const_new"] }

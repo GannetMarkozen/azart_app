@@ -1,3 +1,5 @@
+pub mod prelude;
+
 use bevy::{prelude::*, a11y::AccessibilityPlugin};
 use bevy::diagnostic::{DiagnosticsPlugin, FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::input::InputPlugin;
@@ -16,6 +18,7 @@ impl Plugin for AzartPlugin {
 			.add_plugins(StatesPlugin::default())
 			.add_plugins(AssetPlugin::default())
 			.add_plugins(InputPlugin::default())
+			.add_plugins(azart_asset::AssetPlugin)
 			.add_plugins(WindowPlugin {
 				primary_window: Some(Window {
 					title: "azart".to_owned(),

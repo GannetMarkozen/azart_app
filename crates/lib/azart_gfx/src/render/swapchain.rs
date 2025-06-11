@@ -121,9 +121,19 @@ impl Swapchain {
 			.map(|i| {
 				let graphics_cmd_pool = {
 					let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT)
 						.queue_family_index(context.queue_families.graphics);
 
 					unsafe { context.device.create_command_pool(&create_info, None) }.expect("Failed to create command pool!")
+				};
+
+				let graphics_cmd = {
+					let create_info = vk::CommandBufferAllocateInfo::default()
+						.level(vk::CommandBufferLevel::PRIMARY)
+						.command_pool(graphics_cmd_pool)
+						.command_buffer_count(1);
+
+					unsafe { context.device.allocate_command_buffers(&create_info) }.expect("Failed to allocate command buffer!")[0]
 				};
 
 				let in_flight_fence = {
@@ -153,6 +163,7 @@ impl Swapchain {
 
 				Frame {
 					graphics_cmd_pool,
+					graphics_cmd,
 					in_flight_fence,
 					image_available_semaphore,
 					render_finished_semaphore,
@@ -320,6 +331,7 @@ impl Drop for Swapchain {
 
 pub struct Frame {
 	pub graphics_cmd_pool: vk::CommandPool,
+	pub graphics_cmd: vk::CommandBuffer,
 	pub in_flight_fence: vk::Fence,
 	pub image_available_semaphore: vk::Semaphore,
 	pub render_finished_semaphore: vk::Semaphore,

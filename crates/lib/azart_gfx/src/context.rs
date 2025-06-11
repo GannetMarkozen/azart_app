@@ -17,6 +17,7 @@ use bevy::math::UVec2;
 use bevy::prelude::{Deref, FromReflect, PartialReflect, Resource};
 use bevy::tasks::IoTaskPool;
 use bevy::utils::HashSet;
+use derivative::Derivative;
 use gpu_allocator::{AllocationSizes, AllocatorDebugSettings, MemoryLocation};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc};
 use thiserror::Error;
@@ -225,7 +226,7 @@ impl GpuContext {
 						.unwrap_or_else(|| panic!("failed to find suitable queue family with flags {:?}", flags))
 						.0 as u32
 				};
-				
+
 				QueueFamilies {
 					graphics: select_queue_family(vk::QueueFlags::GRAPHICS),
 					compute: select_queue_family(vk::QueueFlags::COMPUTE),
@@ -376,7 +377,7 @@ impl GpuContext {
 
 				(device, buffer_device_address_enabled)
 			};
-			
+
 			let exts = Extensions {
 				swapchain: ash::khr::swapchain::Device::new(&instance, &device),
 				surface: ash::khr::surface::Instance::new(&entry, &instance),
@@ -428,9 +429,9 @@ impl GpuContext {
 						}
 					},
 					ubo_max_size: props.limits.max_uniform_buffer_range as _,
-					ubo_min_alignment: props.limits.min_uniform_buffer_offset_alignment as _,
+					ubo_min_align: props.limits.min_uniform_buffer_offset_alignment as _,
 					ssbo_max_size: props.limits.max_storage_buffer_range as _,
-					ssbo_min_alignment: props.limits.min_storage_buffer_offset_alignment as _,
+					ssbo_min_align: props.limits.min_storage_buffer_offset_alignment as _,
 					push_constants_max_size: props.limits.max_push_constants_size as _,
 				}
 			};
@@ -539,7 +540,7 @@ impl GpuContext {
 		use vk::ImageAspectFlags;
 
 		assert_ne!(mips.len(), 0, "Mip count must be greater than 0!");
-		
+
 		let (
 			src_access_mask,
 			dst_access_mask,
@@ -597,68 +598,68 @@ impl GpuContext {
 
 		unsafe { self.device.cmd_pipeline_barrier(cmd, src_stage, dst_stage, vk::DependencyFlags::empty(), &[], &[], &[barrier]); }
 	}
-	
+
 	// @NOTE: Insanely unoptimized atm.
 	pub fn immediate_cmd<T>(&self, queue_family: u32, closure: impl FnOnce(vk::CommandBuffer) -> T) -> T {
 		assert!(queue_family == self.queue_families.graphics || queue_family == self.queue_families.compute || queue_family == self.queue_families.transfer);
-		
+
 		let cmd_pool = {
 			let create_info = vk::CommandPoolCreateInfo::default()
 				.queue_family_index(self.queue_families.graphics);
-			
+
 			unsafe { self.device.create_command_pool(&create_info, None).expect("Failed to create command pool!") }
 		};
-		
+
 		let cmd = {
 			let create_info = vk::CommandBufferAllocateInfo::default()
 				.command_pool(cmd_pool)
 				.level(vk::CommandBufferLevel::PRIMARY)
 				.command_buffer_count(1);
-			
+
 			unsafe { self.device.allocate_command_buffers(&create_info) }.expect("Failed to allocate command buffer!")[0]
 		};
-		
+
 		// Begin.
 		unsafe {
 			let begin_info = vk::CommandBufferBeginInfo::default()
 				.flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-			
+
 			self.device.begin_command_buffer(cmd, &begin_info).expect("Failed to begin command buffer!");
 		}
-		
+
 		let result = closure(cmd);
-		
+
 		// End
 		unsafe { self.device.end_command_buffer(cmd) }.unwrap();
-		
+
 		let one_time_submit_fence = {
 			let create_info = vk::FenceCreateInfo::default();
 			unsafe { self.device.create_fence(&create_info, None).expect("Failed to create fence!") }
 		};
-		
+
 		// Upload to queue.
 		{
 			let submit_info = vk::SubmitInfo::default()
 				.command_buffers(slice::from_ref(&cmd));
-			
+
 			let queue = unsafe { self.device.get_device_queue(queue_family, 0) };
-			
+
 			unsafe { self.device.queue_submit(queue, slice::from_ref(&submit_info), one_time_submit_fence) }.expect("Failed to submit command buffer!");
 		};
-		
+
 		// Wait for all queued commands to finish.
 		unsafe { self.device.wait_for_fences(slice::from_ref(&one_time_submit_fence), true, u64::MAX) }.unwrap();
-		
+
 		// Wait for submit to complete.
 		unsafe {
 			self.device.destroy_fence(one_time_submit_fence, None);
 			self.device.free_command_buffers(cmd_pool, slice::from_ref(&cmd));
 			self.device.destroy_command_pool(cmd_pool, None);
 		}
-		
+
 		result
 	}
-	
+
 	pub fn upload_buffer<T>(&self, buffer: &Buffer, closure: impl FnOnce(&mut [u8]) -> T) -> T {
 		let staging_buffer = {
 			let create_info = vk::BufferCreateInfo::default()
@@ -701,14 +702,14 @@ impl GpuContext {
 		};
 
 		unsafe { self.device.bind_buffer_memory(staging_buffer, allocation.memory(), allocation.offset()) }.expect("Failed to bind buffer memory!");
-		
+
 		let memory = unsafe {
 			let memory = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
 			slice::from_raw_parts_mut(memory, buffer.size())
 		};
-		
+
 		let result = closure(memory);
-		
+
 		self.immediate_cmd(self.queue_families.transfer, |cmd| {
 			let regions = [
 				vk::BufferCopy::default()
@@ -716,15 +717,15 @@ impl GpuContext {
 					.dst_offset(0)
 					.size(buffer.size() as u64),
 			];
-			
+
 			unsafe { self.device.cmd_copy_buffer(cmd, staging_buffer, buffer.handle, &regions); }
 		});
-		
+
 		unsafe {
 			self.device.destroy_buffer(staging_buffer, None);
 			self.dealloc(allocation);
 		}
-		
+
 		result
 	}
 
@@ -840,7 +841,7 @@ impl GpuContext {
 
 		result
 	}
-	
+
 	pub fn create_shader_module(&self, path: &ShaderPath) -> Result<ShaderModule, ShaderModuleError> {
 		// Load Spirv struct from file.
 		let spirv = {
@@ -944,9 +945,9 @@ pub struct Extensions {
 pub struct Limits {
 	pub max_msaa: Msaa,
 	pub ubo_max_size: usize,
-	pub ubo_min_alignment: usize,
+	pub ubo_min_align: usize,
 	pub ssbo_max_size: usize,
-	pub ssbo_min_alignment: usize,
+	pub ssbo_min_align: usize,
 	pub push_constants_max_size: usize,
 }
 

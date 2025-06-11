@@ -154,7 +154,7 @@ impl GraphicsPipeline {
 
 			(pipeline_layout, descriptor_set_layouts)
 		};
-		
+
 		let pipeline = {
 			let stages = [
 				vk::PipelineShaderStageCreateInfo::default()
@@ -166,10 +166,10 @@ impl GraphicsPipeline {
 					.module(fragment_shader_module.handle)
 					.name(c"main"),
 			];
-			
+
 			let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
 				.front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-				.cull_mode(vk::CullModeFlags::NONE)
+				.cull_mode(vk::CullModeFlags::BACK)
 				.rasterizer_discard_enable(false)
 				.line_width(1.0);
 
@@ -191,14 +191,14 @@ impl GraphicsPipeline {
 					.vertex_binding_descriptions(&vertex_binding_descriptions)
 					.vertex_attribute_descriptions(&vertex_attribute_descriptions),
 			};
-			
+
 			let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
 				.topology(match create_info.fill_mode {
 					TriangleFillMode::Fill => vk::PrimitiveTopology::TRIANGLE_LIST,
 					TriangleFillMode::Wireframe => vk::PrimitiveTopology::LINE_LIST,
 				})
 				.primitive_restart_enable(false);
-			
+
 			let color_attachments = [
 				vk::PipelineColorBlendAttachmentState::default()
 					.color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B | vk::ColorComponentFlags::A)
@@ -207,23 +207,23 @@ impl GraphicsPipeline {
 					.src_color_blend_factor(vk::BlendFactor::ONE)
 					.dst_color_blend_factor(vk::BlendFactor::ZERO),
 			];
-			
+
 			let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
 				.logic_op_enable(false)
 				.attachments(&color_attachments);
-			
+
 			let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
 				.depth_test_enable(true)
 				.depth_write_enable(true)
 				.depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL)
 				.depth_bounds_test_enable(false)
 				.stencil_test_enable(false);
-			
+
 			let msaa_state = vk::PipelineMultisampleStateCreateInfo::default()
 				.rasterization_samples(create_info.msaa.as_vk_sample_count())
 				.sample_shading_enable(false)
 				.min_sample_shading(1.0);
-			
+
 			let create_info = vk::GraphicsPipelineCreateInfo::default()
 				.render_pass(render_pass)
 				.subpass(0)
@@ -239,10 +239,10 @@ impl GraphicsPipeline {
 				.layout(pipeline_layout)
 				.base_pipeline_handle(vk::Pipeline::null())
 				.base_pipeline_index(-1);
-			
+
 			unsafe { context.device.create_graphics_pipelines(vk::PipelineCache::null(), slice::from_ref(&create_info), None).unwrap()[0] }
 		};
-		
+
 		#[cfg(debug_assertions)]
 		unsafe {
 			context.set_debug_name(name.as_str(), pipeline);
@@ -250,7 +250,7 @@ impl GraphicsPipeline {
 		}
 
 		drop((vertex_shader_module, fragment_shader_module));
-		
+
 		Self {
 			handle: pipeline,
 			descriptor_set_layouts,

@@ -7,9 +7,10 @@ build = "build.rs"
 [dependencies]
 azart_gfx_utils = { path = "../azart_gfx_utils" }
 azart_utils = { path = "../azart_utils" }
+azart_asset = { path = "../azart_asset" }
 ash = "0.38.0"
 ash-window = "0.13.0"
-bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_asset", "bevy_state", "multi_threaded"] }
+bevy = { version = "0.15.3", default-features = false, features = ["bevy_winit", "bevy_window", "bevy_state", "multi_threaded",] }
 winit = "0.30.9"
 gpu-allocator = "0.27.0"
 thiserror = "2.0.12"
@@ -25,6 +26,8 @@ vk-sync = { path = "../vk-sync-rs" }
 walkdir = "2.5.0"
 renderdoc = "0.12.1"
 either = "*"
+gltf = "1.4.1"
+serde_bytes = "*"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"
