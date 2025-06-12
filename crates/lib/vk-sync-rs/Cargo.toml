@@ -1,0 +1,26 @@
+[package]
+name = "vk-sync"
+version = "0.1.6"
+license = "MIT/Apache-2.0"
+authors = ["Graham Wihlidal <graham@wihlidal.ca>"]
+homepage = "https://github.com/gwihlidal/vk-sync-rs"
+repository = "https://github.com/gwihlidal/vk-sync-rs"
+documentation = "https://docs.rs/vk-sync"
+description = "Simplification of core Vulkan synchronization mechanisms such as pipeline barriers and events."
+categories = ["api-bindings", "rendering", "rendering::engine", "rendering::graphics-api", ]
+keywords = ["vulkan", "vk", "ash", "graphics", "3d"]
+readme = "README.md"
+exclude = [
+    ".travis.yml",
+    ".gitignore",
+    "appveyor.yml"
+]
+edition = "2018"
+
+[badges]
+travis-ci = { repository = "gwihlidal/vk-sync-rs" }
+appveyor = { repository = "gwihlidal/vk-sync-rs" }
+maintenance = { status = "actively-developed" }
+
+[dependencies]
+ash = "0.38.0"# @MODIFIED
