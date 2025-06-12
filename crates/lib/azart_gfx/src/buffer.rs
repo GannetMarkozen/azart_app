@@ -1,4 +1,5 @@
 use std::mem::ManuallyDrop;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use ash::vk;
 use azart_asset::{bincode, AssetHandler};
@@ -10,6 +11,7 @@ use gpu_allocator::vulkan::AllocationCreateDesc;
 use azart_gfx_utils::GpuResource;
 use derivative::Derivative;
 use serde::{Deserialize, Deserializer, Serialize};
+use crate::render::plugin::align_to;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -20,7 +22,7 @@ pub struct Buffer {
 	pub(crate) allocation: ManuallyDrop<Allocation>,
 	size: usize,
 	#[derivative(Debug = "ignore")]
-	pub(crate) context: Arc<GpuContext>,
+	pub(crate) cx: Arc<GpuContext>,
 }
 
 impl Buffer {
@@ -82,7 +84,7 @@ impl Buffer {
 			handle: buffer,
 			allocation: ManuallyDrop::new(allocation),
 			size: create_info.size,
-			context,
+			cx: context,
 		}
 	}
 
@@ -95,13 +97,30 @@ impl Buffer {
 	pub fn name(&self) -> &DebugString {
 		&self.name
 	}
+
+	/// Returns None if this Buffer was not created with the memory location CpuToGpu.
+	#[inline(always)]
+	pub fn mapping(&self) -> Option<&[u8]> {
+		self
+			.allocation
+			.mapped_slice()
+			.map(|data| &data[..self.size])
+	}
+
+	#[inline(always)]
+	pub fn mapping_mut(&mut self) -> Option<&mut [u8]> {
+		self
+			.allocation
+			.mapped_slice_mut()
+			.map(|data| &mut data[..self.size])
+	}
 }
 
 impl Drop for Buffer {
 	fn drop(&mut self) {
 		unsafe {
-			self.context.dealloc(ManuallyDrop::take(&mut self.allocation));
-			self.context.device.destroy_buffer(self.handle, None);
+			self.cx.dealloc(ManuallyDrop::take(&mut self.allocation));
+			self.cx.device.destroy_buffer(self.handle, None);
 		}
 	}
 }

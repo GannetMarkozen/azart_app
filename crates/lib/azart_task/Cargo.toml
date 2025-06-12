@@ -1,0 +1,12 @@
+[package]
+name = "azart_task"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-task = "4.7.1"
+crossbeam = "*"
+futures = "*"
+rand = "0.9.1"
+scopeguard = "1.2.0"
+slab = "0.4.9"

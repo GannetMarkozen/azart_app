@@ -287,8 +287,22 @@ pub struct RenderDoc(pub renderdoc::RenderDoc<renderdoc::V110>);
 
 #[must_use]
 #[inline(always)]
-pub const fn align_to(value: usize, alignment: usize) -> usize {
-	(value + alignment - 1) & !(alignment - 1)
+pub const fn align_to(value: usize, align: usize) -> usize {
+	(value + align - 1) & !(align - 1)
+}
+
+/// Computes the minimum stride for accessing a buffered ubo.
+#[must_use]
+#[inline(always)]
+pub const fn ubo_stride<T: Sized>(ubo_min_align: usize) -> usize {
+	align_to(size_of::<T>(), ubo_min_align)
+}
+
+/// Computes the total size required to create a frame-buffered ubo while respecting ubo min alignment.
+#[must_use]
+#[inline(always)]
+pub const fn ubo_size<T: Sized>(frames_in_flight: usize, ubo_min_align: usize) -> usize {
+	ubo_stride::<T>(ubo_min_align) * (frames_in_flight - 1) + size_of::<T>()
 }
 
 fn create_base_pass(
@@ -519,11 +533,10 @@ fn create_global_resources(
 		DisplayMode::Xr => _ = commands.spawn((
 			XrCamera::default(),
 			Transform::default(),
-			//Transform::from_matrix(Mat4::look_at_rh(Vec3::new(0.0, 3.0, -3.0), Vec3::ZERO, Vec3::Y)),
 		)),
 		DisplayMode::Std => _ = commands.spawn((
-			Camera { fov: 45.0 },
-			Transform::from_matrix(Mat4::look_at_rh(Vec3::new(0.0, 3.0, -3.0), Vec3::ZERO, Vec3::Y)),
+			Camera { fov: 70.0 },
+			Transform::from_matrix(Mat4::look_at_rh(Vec3::new(0.0, -0.5, -1.5), Vec3::new(0.0, -1.5, 0.0), Vec3::Y)),
 		)),
 	}
 
