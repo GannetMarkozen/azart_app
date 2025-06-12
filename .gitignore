@@ -1,4 +1,5 @@
 /target
+/crates/lib/*/target
 /assets/spv
 /.idea
 /.lapce
